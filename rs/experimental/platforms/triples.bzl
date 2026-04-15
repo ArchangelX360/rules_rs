@@ -10,6 +10,12 @@ _WINDOWS_ABI_CONSTRAINTS = {
     "msvc": "@rules_rs//rs/experimental/platforms/constraints:windows_msvc",
 }
 
+_WINDOWS_LLVM_ABI_CONSTRAINTS = {
+    "gnu": "@llvm//constraints/abi:gnu",
+    "gnullvm": "@llvm//constraints/abi:gnullvm",
+    "msvc": "@llvm//constraints/abi:msvc",
+}
+
 def triple_to_constraint_set(target_triple):
     constraints = _triple_to_constraint_set(target_triple)
     t = triple(target_triple)
@@ -23,6 +29,7 @@ def triple_to_constraint_set(target_triple):
             constraints.append("@llvm//constraints/libc:gnu.2.28")
     elif t.system == "windows":
         constraints.append(_WINDOWS_ABI_CONSTRAINTS[t.abi])
+        constraints.append(_WINDOWS_LLVM_ABI_CONSTRAINTS[t.abi])
 
     return constraints
 
