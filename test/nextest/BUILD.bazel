@@ -1,0 +1,164 @@
+"""End-to-end coverage for rust_nextest_test / nextest_test.
+
+This directory is a subpackage, so it is excluded from the glob in //:BUILD.bazel that drives
+the Cargo workspace fixtures, the same way test/miri is.
+"""
+
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rs//rs/experimental/nextest:defs.bzl", "nextest_test", "rust_nextest_test")
+load(":analysis_test.bzl", "coverage_env_test", "executable_is_a_symlink_test", "metadata_content_test", "no_machine_paths_test")
+
+package(default_visibility = ["//visibility:public"])
+
+FIXTURE_PACKAGE = {
+    "authors": "Ada <ada@example.com>:Grace <grace@example.com>",
+    "description": "a fixture crate",
+    "license": "Apache-2.0",
+    "name": "my-fixture-crate",
+    "version": "4.5.6",
+}
+
+rust_library(
+    name = "mylib",
+    srcs = ["mylib.rs"],
+    crate_name = "mylib",
+    edition = "2021",
+)
+
+# The lib-unit-test shape: nextest reports binary id "mylib", kind "lib".
+rust_nextest_test(
+    name = "unit_test",
+    crate = ":mylib",
+    edition = "2021",
+)
+
+# The integration-test shape: binary id "mylib::integration_test", kind "test".
+rust_nextest_test(
+    name = "integration_test",
+    srcs = ["integration_test.rs"],
+    edition = "2021",
+    deps = [":mylib"],
+)
+
+# Working directory and CARGO_MANIFEST_DIR parity with rust_test, plus relative data access.
+rust_nextest_test(
+    name = "manifest_dir_test",
+    srcs = ["manifest_dir_test.rs"],
+    data = ["fixtures/data.txt"],
+    edition = "2021",
+)
+
+# CARGO_PKG_* is set by nextest from the synthesized manifest, so it comes from this attribute.
+rust_nextest_test(
+    name = "cargo_pkg_env_test",
+    srcs = ["cargo_pkg_env_test.rs"],
+    cargo_package = FIXTURE_PACKAGE,
+    edition = "2021",
+)
+
+rust_nextest_test(
+    name = "env_test",
+    srcs = ["env_test.rs"],
+    edition = "2021",
+    env = {"FROM_ENV_ATTR": "set-by-rule"},
+    env_inherit = ["RULES_RS_NEXTEST_E2E_INHERITED"],
+)
+
+# filter_expr narrows every run of the target; drop_me panics if it is ever executed.
+rust_nextest_test(
+    name = "filtered_test",
+    srcs = ["filtered_test.rs"],
+    edition = "2021",
+    filter_expr = "test(/^keep_me/)",
+)
+
+# Bazel sharding, mapped onto nextest's native partitioning. No shell wrapper involved, and an
+# empty shard must not fail the target.
+rust_nextest_test(
+    name = "sharded_test",
+    srcs = ["sharded_test.rs"],
+    edition = "2021",
+    shard_count = 3,
+)
+
+# `args` is appended by Bazel at run time; `--exact` selects a single test.
+rust_nextest_test(
+    name = "args_test",
+    srcs = ["args_test.rs"],
+    args = [
+        "--exact",
+        "selected_by_args",
+    ],
+    edition = "2021",
+)
+
+# Several test binaries scheduled by one nextest run inside a single Bazel target. This is the
+# shape rust_test cannot express, and it is why nextest_test is public alongside the macro.
+rust_test(
+    name = "multi_a",
+    srcs = ["integration_test.rs"],
+    crate_name = "multi_a",
+    edition = "2021",
+    experimental_enable_sharding = False,
+    tags = ["manual"],
+    deps = [":mylib"],
+)
+
+rust_test(
+    name = "multi_b",
+    srcs = ["filtered_test.rs"],
+    crate_name = "multi_b",
+    edition = "2021",
+    experimental_enable_sharding = False,
+    tags = ["manual"],
+)
+
+nextest_test(
+    name = "multi_test",
+    # Both binaries come from the same Bazel package, so they share a synthesized cargo
+    # package; their binary ids differ by target name.
+    filter_expr = "not test(drop_me)",
+    tests = [
+        ":multi_a",
+        ":multi_b",
+    ],
+)
+
+# Deliberately failing, so junit_report_test can assert on a real report. Never run directly.
+rust_nextest_test(
+    name = "failing_test",
+    srcs = ["failing_test.rs"],
+    edition = "2021",
+    tags = ["manual"],
+)
+
+rust_test(
+    name = "junit_report_test",
+    srcs = ["junit_report_test.rs"],
+    crate_name = "junit_report_test",
+    data = [":failing_test"],
+    edition = "2021",
+    env = {"FAILING_TEST": "$(rootpath :failing_test)"},
+)
+
+# Analysis-time assertions on the generated metadata and actions.
+metadata_content_test(
+    name = "metadata_content_test",
+    target_under_test = ":unit_test",
+)
+
+no_machine_paths_test(
+    name = "no_machine_paths_test",
+    target_under_test = ":unit_test",
+)
+
+executable_is_a_symlink_test(
+    name = "executable_is_a_symlink_test",
+    target_under_test = ":unit_test",
+)
+
+coverage_env_test(
+    name = "coverage_env_test",
+    target_under_test = ":unit_test",
+)

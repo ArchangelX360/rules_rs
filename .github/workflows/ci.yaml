@@ -71,12 +71,38 @@ jobs:
         working-directory: ${{ matrix.folder }}
         shell: bash
         run: |
+          # test/nextest:env_test checks that env_inherit forwards a variable from the Bazel
+          # client environment, which is only meaningful if one is actually set there.
+          export RULES_RS_NEXTEST_E2E_INHERITED=from-outside
           bazel \
             --bazelrc=.bazelrc \
             test \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
             //...
+
+      # The only thing that catches the multi-object coverage collector regressing: nextest
+      # runs one process per test, so coverage depends on merging per-process profraw files
+      # across every test binary in a target.
+      - name: bazel coverage //nextest/...
+        if: matrix.folder == 'test'
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+        working-directory: test
+        shell: bash
+        run: |
+          bazel \
+            --bazelrc=.bazelrc \
+            coverage \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
+            --instrumentation_filter=//nextest[:/] \
+            //nextest/...
+          report="$(bazel info output_path)/_coverage/_coverage_report.dat"
+          if ! grep -q '^SF:nextest/' "$report"; then
+            echo "::error::no nextest coverage in $report" >&2
+            exit 1
+          fi
 
   test_windows:
     strategy:
@@ -122,3 +148,87 @@ jobs:
             --jobs=100 \
             //:all_builds_aarch64-pc-windows-gnullvm \
             //:all_builds_x86_64-pc-windows-gnullvm
+
+  test_windows_nextest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+        bazel_version: [9.x]
+    runs-on: ${{ matrix.os }}
+
+    # The existing test_windows job only builds. This one runs the nextest tests, which is what
+    # exercises the runfiles manifest parser, Windows path canonicalization, the TOML escaping
+    # of Windows paths, and the aarch64-pc-windows-msvc cargo-nextest prebuilt.
+    name: Test //nextest with Bazel ${{ matrix.bazel_version }} on ${{ matrix.os }}
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Tests execute locally, since the remote executors are linux; the remote cache is still
+      # used. Both runfiles modes are covered: whatever the platform default is, and the
+      # manifest-only path the runner materializes into TEST_TMPDIR. The flags are passed here
+      # rather than in a .bazelrc so no other target's runfiles behaviour changes.
+      - name: bazel test //nextest/... (default runfiles)
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+        working-directory: test
+        shell: bash
+        run: |
+          git config --global core.longpaths true
+          # //nextest:env_test checks that env_inherit forwards a client environment variable,
+          # so it has to be exported rather than passed with --test_env, which would set it
+          # directly and pass even if env_inherit were broken.
+          export RULES_RS_NEXTEST_E2E_INHERITED=from-outside
+          bazel \
+            --output_user_root=C:/bzl \
+            --bazelrc=.bazelrc \
+            test \
+            --remote_cache=grpcs://remote.buildbuddy.io \
+            --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
+            //nextest/...
+
+      - name: bazel test //nextest/... (manifest-only runfiles)
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+        working-directory: test
+        shell: bash
+        run: |
+          export RULES_RS_NEXTEST_E2E_INHERITED=from-outside
+          bazel \
+            --output_user_root=C:/bzl \
+            --bazelrc=.bazelrc \
+            test \
+            --noenable_runfiles \
+            --remote_cache=grpcs://remote.buildbuddy.io \
+            --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
+            //nextest/...
+
+  test_macos_nextest:
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel_version: [9.x]
+    runs-on: macos-latest
+
+    # macOS is not part of the main matrix yet, so this is advisory. It exercises the universal
+    # cargo-nextest binary and DYLD_FALLBACK_LIBRARY_PATH handling.
+    name: Test //nextest with Bazel ${{ matrix.bazel_version }} on macos-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: bazel test //nextest/...
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
+        working-directory: test
+        shell: bash
+        run: |
+          export RULES_RS_NEXTEST_E2E_INHERITED=from-outside
+          bazel \
+            --bazelrc=.bazelrc \
+            test \
+            --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
+            //nextest/...

@@ -639,6 +639,28 @@ def lint_config(package_name = None):
 
     return dep_data.get("lint_config")
 
+# Cargo package identity, for rust_nextest_test's `cargo_package` attribute. cargo nextest
+# sets CARGO_PKG_* for each test process from the manifest it is handed, so this is what makes
+# those variables match Cargo.toml.
+def cargo_package(package_name = None):
+    dep_data = DEP_DATA.get(package_name or native.package_name())
+    if not dep_data:
+        return {{}}
+
+    result = {{
+        "edition": dep_data["edition"],
+        "name": dep_data.get("package_name", dep_data["crate_name"]),
+        "version": dep_data["version"],
+    }}
+    for field in ["authors", "description", "homepage", "license", "license_file", "repository"]:
+        value = dep_data.get(field)
+        if value == None:
+            continue
+
+        # cargo joins CARGO_PKG_AUTHORS with colons.
+        result[field] = ":".join(value) if type(value) == "list" else value
+    return result
+
 def all_crate_deps(
         normal = False,
         normal_dev = False,

@@ -1,0 +1,55 @@
+"""Target-configuration selection of the `cargo-nextest` prebuilt.
+
+`cargo-nextest` is a *runtime* tool: it lives in a test's runfiles and executes on the same
+platform as the test binaries it drives. So it must be selected in the target configuration
+with `select()`, not resolved as a toolchain against the exec platform.
+
+The selection key is `(os, cpu)` rather than a rules_rs target triple because the triple
+config settings additionally constrain libc, the Windows ABI, and float/ISA -- a triple-keyed
+select would need one arm per triple, all mapping to just five files, and would still miss
+user-defined platforms that do not set the rules_rs constraints. `(os, cpu)` is also the
+natural granularity: the musl archive is correct for both `-gnu` and `-musl` Linux targets,
+and the Apple universal binary for both macOS architectures.
+"""
+
+load("//rs/experimental/nextest:prebuilts.bzl", "NEXTEST_PREBUILTS", "nextest_binary_name")
+
+package(default_visibility = ["//visibility:public"])
+
+_PLATFORMS = sorted({
+    platform: None
+    for prebuilt in NEXTEST_PREBUILTS
+    for platform in prebuilt.platforms
+})
+
+[
+    config_setting(
+        name = "{}_{}".format(os, cpu),
+        constraint_values = [
+            "@platforms//os:" + os,
+            "@platforms//cpu:" + cpu,
+        ],
+    )
+    for os, cpu in _PLATFORMS
+]
+
+alias(
+    name = "cargo_nextest",
+    actual = select(
+        {
+            ":{}_{}".format(os, cpu): "@{}//:{}".format(
+                prebuilt.repo,
+                nextest_binary_name(prebuilt),
+            )
+            for prebuilt in NEXTEST_PREBUILTS
+            for os, cpu in prebuilt.platforms
+        },
+        no_match_error = (
+            "cargo-nextest has no prebuilt binary for this target platform. " +
+            "rust_nextest_test/nextest_test support linux, macos and windows on x86_64 and " +
+            "aarch64; a test binary for any other platform cannot be executed by nextest. " +
+            "Use rust_test instead, or point " +
+            "--@rules_rs//rs/experimental/nextest:nextest_binary at your own cargo-nextest."
+        ),
+    ),
+)

@@ -50,6 +50,17 @@ use_repo(
     ]
 ]
 
+# Experimental: hermetic cargo-nextest for //rs/experimental/nextest.
+nextest = use_extension("//rs/experimental/nextest:extensions.bzl", "nextest")
+use_repo(
+    nextest,
+    "cargo_nextest_linux_aarch64",
+    "cargo_nextest_linux_x86_64",
+    "cargo_nextest_macos",
+    "cargo_nextest_windows_aarch64",
+    "cargo_nextest_windows_x86_64",
+)
+
 bazel_dep(name = "bazel_lib", version = "3.0.0")
 bazel_dep(name = "bazel_features", version = "1.45.0")
 bazel_dep(name = "bazel_skylib", version = "1.4.1")

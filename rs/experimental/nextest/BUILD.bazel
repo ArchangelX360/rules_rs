@@ -1,0 +1,38 @@
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+
+package(default_visibility = ["//visibility:private"])
+
+# Build-wide override of the cargo-nextest binary, e.g.
+# --@rules_rs//rs/experimental/nextest:nextest_binary=//my:cargo-nextest
+label_flag(
+    name = "nextest_binary",
+    build_setting_default = "//rs/experimental/nextest/private/platform_config:cargo_nextest",
+    visibility = ["//visibility:public"],
+)
+
+bzl_library(
+    name = "extensions",
+    srcs = ["extensions.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":prebuilts",
+        "@bazel_tools//tools/build_defs/repo:cache.bzl",
+        "@bazel_tools//tools/build_defs/repo:http.bzl",
+        "@bazel_tools//tools/build_defs/repo:utils.bzl",
+    ],
+)
+
+bzl_library(
+    name = "defs",
+    srcs = ["defs.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rs/experimental/nextest/private:macro",
+        "//rs/experimental/nextest/private:nextest_test",
+    ],
+)
+
+bzl_library(
+    name = "prebuilts",
+    srcs = ["prebuilts.bzl"],
+)

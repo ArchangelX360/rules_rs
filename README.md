@@ -496,6 +496,91 @@ The script rewrites common `@rules_rust` Rust loads to `@rules_rs//rs:*` wrapper
 
 </details>
 
+## Experimental: `cargo nextest`
+
+`rust_nextest_test` is a drop-in replacement for `rust_test` that runs the test binary under
+[`cargo nextest`](https://nexte.st). `cargo-nextest` is resolved hermetically as a
+sha256-pinned prebuilt and driven **without cargo**, so nothing outside the build graph is
+needed at test time.
+
+```starlark
+load("@rules_rs//rs/experimental/nextest:defs.bzl", "rust_nextest_test")
+
+rust_nextest_test(
+    name = "mylib_test",
+    crate = ":mylib",
+    shard_count = 3,
+)
+```
+
+Compared with `rust_test`, you get:
+
+- **A real JUnit report.** nextest writes it straight to `XML_OUTPUT_FILE`, so Bazel reports
+  one `<testcase>` per test instead of synthesizing a stub from the log.
+- **One process per test**, so a `SIGSEGV` or an `abort()` fails one test rather than the
+  whole target, and per-test timeouts still produce a report.
+- **`--test_filter` support.** `rust_test` ignores it; here it maps to a substring filter, or
+  to a [filterset](https://nexte.st/docs/filtersets/) when the value looks like one. Prefix
+  with `expr:`, `exact:` or `substring:` to be explicit.
+- **Sharding without a shell script.** `shard_count` maps to nextest's native
+  `--partition hash:i/m`, replacing the `bash`/`.bat` wrapper pair.
+
+Additional attributes: `cargo_package`, `nextest_profile`, `nextest_config`, `nextest_args`,
+`filter_expr`, `test_threads`, `fail_fast`, `binary_ids`, `nextest`. `nextest_test` is also
+public and takes several `rust_test` targets, so one Bazel target can schedule across multiple
+test binaries.
+
+### `CARGO_PKG_*`
+
+nextest sets `CARGO_MANIFEST_DIR` and the `CARGO_PKG_*` family for every test process from the
+manifest it is handed, so `env` entries for those are overwritten. Use `cargo_package` instead.
+In a Cargo workspace, the generated hub exposes a helper that fills it in from `Cargo.toml`:
+
+```starlark
+load("@crates//:defs.bzl", "cargo_package")
+
+rust_nextest_test(
+    name = "mylib_test",
+    crate = ":mylib",
+    cargo_package = cargo_package(),
+)
+```
+
+Each test's working directory is the crate's package directory, as under cargo, which is the
+same directory `rust_test` reports in `CARGO_MANIFEST_DIR`.
+
+### Pinning a different version
+
+```starlark
+nextest = use_extension("@rules_rs//rs/experimental/nextest:extensions.bzl", "nextest")
+nextest.version(
+    version = "0.9.150",
+    sha256 = {"universal-apple-darwin": "..."},  # from the release's .sha256 assets
+)
+```
+
+Or point the whole build at your own binary with
+`--@rules_rs//rs/experimental/nextest:nextest_binary=//my:cargo-nextest`.
+
+### Known limitations
+
+- Each test run logs `warning: failed to detect the rustc libdir`. The generated metadata
+  reports the libdir as unavailable on purpose: naming it would mean baking an absolute machine
+  path into a build artifact and losing remote cache hits. The runner supplies the runfiles
+  library directories itself, so nothing is actually missing.
+- `use_libtest_harness = False` is rejected: without libtest, nextest cannot enumerate tests.
+- nextest reads `.cargo/config.toml` from every ancestor of its working directory and honours
+  `[env]`, `build.target` and `target.<triple>.runner` from what it finds. The runner isolates
+  `CARGO_HOME` and runs from a scratch directory, and sandboxed and remotely executed builds
+  never reach a real `.cargo` directory. For unsandboxed local builds where one sits above the
+  output base, the runner prints a warning naming the file;
+  `RULES_RS_NEXTEST_STRICT_CARGO_CONFIG=1` turns that into an error.
+- `TEST_WARNINGS_OUTPUT_FILE`, `TEST_LOGSPLITTER_OUTPUT_FILE` and
+  `TEST_UNUSED_RUNFILES_LOG_FILE` are not written: they are Google-internal channels with no
+  nextest equivalent. Everything else in the
+  [test encyclopedia](https://bazel.build/reference/test-encyclopedia) is supported, including
+  coverage, `TEST_PREMATURE_EXIT_FILE` and `TEST_INFRASTRUCTURE_FAILURE_FILE`.
+
 ## Public API
 
 See https://registry.bazel.build/docs/rules_rs

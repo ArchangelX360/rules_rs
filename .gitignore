@@ -6,3 +6,4 @@ bazel-*
 target
 
 toml2json/target
+.bazelbsp

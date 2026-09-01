@@ -661,6 +661,17 @@ def resolve_cargo_workspace_members(
         workspace_member_keys = workspace_member_keys,
     )
 
+# Package fields carried into DEP_DATA only when set, since each record is repr()'d into the
+# generated data.bzl. These map onto the CARGO_PKG_* variables cargo exposes to tests.
+_CARGO_PACKAGE_METADATA_FIELDS = [
+    "authors",
+    "description",
+    "homepage",
+    "license",
+    "license_file",
+    "repository",
+]
+
 def workspace_dep_data(
         *,
         cargo_metadata,
@@ -767,8 +778,18 @@ def workspace_dep_data(
             "dev_deps": dev_deps,
             "dev_deps_by_platform": dev_deps_by_platform,
             "edition": package.get("edition", "2015"),
+            # `crate_name` has hyphens replaced, so the cargo package name is kept separately.
+            # Together with `version` and the optional fields below, this is what lets
+            # rust_nextest_test report the CARGO_PKG_* values cargo would; nextest sets those
+            # itself from the manifest it is given, so there is no other way to control them.
+            "package_name": package["name"],
             "shared_libraries": shared_libraries,
+            "version": package["version"],
         }
+        for field in _CARGO_PACKAGE_METADATA_FIELDS:
+            value = package.get(field)
+            if value:
+                package_dep_data[field] = value
         lint_config = lint_configs.get(bazel_package)
         if lint_config:
             package_dep_data["lint_config"] = lint_config
