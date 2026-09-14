@@ -109,6 +109,60 @@ EOF
   fi
 }
 
+# --- GNU patch ----------------------------------------------------------------
+# crate_repository applies `patches` with `patch_tool = "patch"`, and several
+# test/ workspaces (rav1e, ring, ...) rely on it, but the image ships no `patch`
+# and there is no root to apt-get one. Download the .deb as an unprivileged user
+# and unpack just the binary into ~/.local/bin.
+install_patch() {
+  if command -v patch >/dev/null 2>&1; then
+    log "patch already available at $(command -v patch)"
+    return 0
+  fi
+
+  log "installing GNU patch from the Ubuntu archive (userspace)"
+  local work="$HOME/.cache/air-patch"
+  rm -rf "$work"
+  mkdir -p "$work/lists/partial" "$work/cache/archives/partial" "$work/debs"
+  # apt drops privileges to _apt for downloads; it needs to write here.
+  chmod -R 0777 "$work"
+
+  cat > "$work/sources.list" <<'EOF'
+deb http://archive.ubuntu.com/ubuntu/ noble main
+EOF
+
+  local apt_opts=(
+    -o "Dir::Etc::SourceList=$work/sources.list"
+    -o "Dir::Etc::SourceParts=/dev/null"
+    -o "Dir::State::Lists=$work/lists"
+    -o "Dir::State::extended_states=$work/extended_states"
+    -o "Dir::Cache=$work/cache"
+    -o "Acquire::Languages=none"
+    -o "APT::Get::List-Cleanup=false"
+  )
+
+  if ! apt-get "${apt_opts[@]}" -qq update; then
+    log "WARNING: apt-get update failed; 'patch' stays unavailable and crate patching in test/ will fail"
+    return 0
+  fi
+  if ! (cd "$work/debs" && apt-get "${apt_opts[@]}" -qq download patch); then
+    log "WARNING: could not download the patch package; crate patching in test/ will fail"
+    return 0
+  fi
+
+  local deb
+  deb="$(find "$work/debs" -name 'patch_*.deb' -print -quit)"
+  if [ -z "$deb" ]; then
+    log "WARNING: no patch_*.deb was downloaded; crate patching in test/ will fail"
+    return 0
+  fi
+
+  dpkg-deb -x "$deb" "$work/root"
+  mkdir -p "$LOCAL_BIN"
+  install -m 0755 "$work/root/usr/bin/patch" "$LOCAL_BIN/patch"
+  log "installed $("$LOCAL_BIN/patch" --version | head -1) to $LOCAL_BIN/patch"
+}
+
 # --- git ----------------------------------------------------------------------
 # This image has no ssh client (and no way to install one without root), so the
 # `ssh://git@github.com/...` git dependency in test/git_crates/Cargo.toml cannot
@@ -158,11 +212,14 @@ warm_caches() {
   # ssh://git@github.com/... which needs an ssh client plus a key (CI supplies
   # SSH_PRIVATE_KEY), so this is best effort with --keep_going.
   log "warming test/ module crate downloads (best effort)"
-  if (cd "$REPO_ROOT/test" && bazel build --nobuild --keep_going //:all_builds 2>&1 | tail -10); then
-    log "test/ module loaded"
+  local test_log="$HOME/.cache/air-startup-test-module.log"
+  if (cd "$REPO_ROOT/test" && bazel build --nobuild --keep_going //:all_builds > "$test_log" 2>&1); then
+    log "test/ module loaded: every crate repository resolved"
   else
-    log "NOTE: test/ module did not load completely (expected without ssh credentials)"
+    log "NOTE: test/ module did not load completely; distinct errors follow ($test_log has the full output)"
+    grep -E '^ERROR' "$test_log" | cut -c1-200 | sort -u | head -15 || true
   fi
+  tail -6 "$test_log" || true
 }
 
 # --- healthcheck --------------------------------------------------------------
@@ -200,6 +257,7 @@ main() {
   configure_shell_env
   configure_bazelrc
   configure_git
+  install_patch
   install_pre_commit
 
   if [ -n "$WARMUP" ]; then
