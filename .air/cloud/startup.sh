@@ -220,6 +220,16 @@ warm_caches() {
     grep -E '^ERROR' "$test_log" | cut -c1-200 | sort -u | head -15 || true
   fi
   tail -6 "$test_log" || true
+
+  # Compile one small crate end to end. This is what puts the Rust toolchain and
+  # the bootstrapped LLVM/libcxx build (~1500 actions) into the disk cache, so a
+  # task that touches resolution does not pay for it.
+  log "warming Rust/LLVM toolchains: building @build_script_env_select//:_workspace_deps"
+  if (cd "$REPO_ROOT/test" && bazel build @build_script_env_select//:_workspace_deps 2>&1 | tail -5); then
+    log "Rust toolchain warm: a crate compiles from Cargo.lock through rules_rs"
+  else
+    log "WARNING: could not compile a crate in test/; building there will start cold"
+  fi
 }
 
 # --- healthcheck --------------------------------------------------------------
@@ -230,6 +240,10 @@ warm_caches() {
 healthcheck() {
   local want attempt=0
   want="$(tr -d '[:space:]' < "$REPO_ROOT/.bazelversion")"
+
+  for tool in bazel git patch pre-commit; do
+    log "healthcheck: $tool -> $(command -v "$tool" || echo 'MISSING')"
+  done
 
   while :; do
     attempt=$((attempt + 1))
