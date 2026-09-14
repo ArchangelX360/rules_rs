@@ -3,7 +3,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_test")
 load(":nextest_test.bzl", "nextest_test")
 
-# Attributes consumed by the nextest_test wrapper rather than by the inner rust_test.
+# Attributes consumed by the nextest_test wrapper.
 _WRAPPER_ATTRS = [
     "binary_ids",
     "cargo_package",
@@ -16,8 +16,7 @@ _WRAPPER_ATTRS = [
     "test_threads",
 ]
 
-# Attributes Bazel interprets on the test target itself, which must therefore stay on the
-# wrapper and not be forwarded to the inner (non-running) rust_test.
+# Attributes Bazel interprets on the test target itself, so they stay on the wrapper.
 _TEST_ATTRS = [
     "args",
     "env",
@@ -68,14 +67,11 @@ def rust_nextest_test(name, **kwargs):
 
     binary_name = name + ".test_binary"
 
-    # The inner target name carries a dot so it reads as a companion of `name`, but rules_rust
-    # derives the crate name from the label and rejects a dot in it. Pinning the crate name to
-    # what plain rust_test would have produced for `name` keeps the compiled crate, and so
-    # nextest's reported binary name, identical to rust_test. It also lets rules_rust infer the
-    # crate root from `<name>.rs`, which the label no longer matches.
+    # rules_rust derives the crate name from the label and rejects the dot in the inner target
+    # name. Pinning it to `name` keeps the compiled crate, and so nextest's reported binary
+    # name, matching rust_test, and lets rules_rust infer the crate root from `<name>.rs`.
     #
-    # On the `crate = ...` path the crate name comes from the wrapped crate instead, so it must
-    # be left alone there.
+    # On the `crate = ...` path the crate name comes from the wrapped crate.
     if "crate" not in kwargs:
         kwargs.setdefault("crate_name", name.replace("-", "_"))
 
@@ -88,10 +84,9 @@ def rust_nextest_test(name, **kwargs):
     tags = kwargs.pop("tags", [])
     rust_test(
         name = binary_name,
-        # Not a target anyone should run directly: nextest drives the binary it produces.
+        # nextest drives the binary this produces; the target is not run directly.
         tags = tags + ["manual"],
-        # Bazel would otherwise wrap the binary in a shell sharding script, and nextest needs
-        # the real libtest binary.
+        # nextest needs the real libtest binary, not a shell sharding wrapper.
         experimental_enable_sharding = False,
         visibility = ["//visibility:private"],
         **kwargs

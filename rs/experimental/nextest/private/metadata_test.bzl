@@ -66,8 +66,8 @@ def _binary_kind_and_id_impl(ctx):
 def _external_repo_paths_impl(ctx):
     env = unittest.begin(ctx)
 
-    # A test binary from an external repository. Anchoring the metadata on the runfiles root
-    # rather than on the workspace directory is what makes these resolve.
+    # A test binary from an external repository, resolved because the metadata is anchored on
+    # the runfiles root.
     entry = _entry(rlocation_path = "other_repo/pkg/it")
     asserts.equals(env, FAKE_TARGET_DIR + "/other_repo/pkg/it", entry.binary_path)
     asserts.equals(env, FAKE_WORKSPACE_ROOT + "/other_repo/pkg", entry.manifest_dir)
@@ -164,8 +164,8 @@ def _binaries_metadata_impl(ctx):
         },
     }, json.decode(document))
 
-    # build-directory is deliberately absent: nextest then defaults it to target-directory, so
-    # one --target-dir-remap suffices and --build-dir-remap is never needed.
+    # build-directory is absent, so nextest defaults it to target-directory and one
+    # --target-dir-remap suffices.
     asserts.false(env, "build-directory" in json.decode(document)["rust-build-meta"])
 
     return unittest.end(env)
@@ -243,8 +243,7 @@ def _shared_package_impl(ctx):
 def _no_machine_paths_impl(ctx):
     env = unittest.begin(ctx)
 
-    # The whole design rests on the generated documents being byte-identical across machines,
-    # which is what makes them remotely cacheable.
+    # The generated documents are byte-identical across machines, and so remotely cacheable.
     documents = [
         binaries_metadata_json(binaries = [_entry()], target_triple = "x86_64-unknown-linux-gnu"),
         cargo_metadata_json(binaries = [_entry()]),

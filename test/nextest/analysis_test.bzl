@@ -1,10 +1,9 @@
 """Analysis-time assertions for nextest_test.
 
 `ctx.actions.write` exposes its content to analysistest, so the generated metadata can be
-asserted on without running anything. These cover the two properties the design rests on and
-that no runtime test can demonstrate: that the metadata contains no machine-specific paths (so
-it is deterministic and remotely cacheable), and that the test executable is a symlink with no
-action running on an execution platform.
+asserted on without running anything. Covers the properties no runtime test can show: that the
+metadata carries no machine-specific paths, and that the target's only actions are metadata
+writes and the runner symlink.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
@@ -12,8 +11,8 @@ load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 def _write_action_contents(tut):
     """Returns the content of every FileWrite action, keyed by output basename.
 
-    Actions whose content is not exposed are skipped: under the coverage configuration Bazel
-    adds its own `.instrumented_files` write, for which `content` is None.
+    Skips actions whose content is not exposed; under the coverage configuration Bazel adds an
+    `.instrumented_files` write whose `content` is None.
     """
     contents = {}
     for action in tut.actions:
@@ -69,9 +68,7 @@ def _no_machine_paths_test_impl(ctx):
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
 
-    # The generated files must be byte-identical on every machine, which is what makes them
-    # cacheable and safe for remote execution. A leaked execroot or home directory would make
-    # every developer's cache entries mutually useless.
+    # The generated files are byte-identical on every machine, and so remotely cacheable.
     for basename, content in _write_action_contents(tut).items():
         for needle in ["bazel-out", "execroot", ".runfiles", "/Users/", "/home/", "/private/var"]:
             asserts.false(
@@ -94,10 +91,8 @@ def _executable_is_a_symlink_test_impl(ctx):
     env = analysistest.begin(ctx)
     tut = analysistest.target_under_test(env)
 
-    # A symlink to a shared runner rather than a per-target compiled launcher stub. That is what
-    # keeps runtime argv reaching the runner untouched, avoids proxying signals and exit codes
-    # through an extra process, and -- asserted below -- leaves no action that has to run on an
-    # execution platform, so a test target costs no remote round trip.
+    # A symlink to a shared runner, so runtime argv reaches it untouched and exit codes are not
+    # proxied through another process.
     symlinks = [action for action in tut.actions if action.mnemonic == "ExecutableSymlink"]
     asserts.equals(
         env,
@@ -106,8 +101,8 @@ def _executable_is_a_symlink_test_impl(ctx):
         "expected exactly one ExecutableSymlink, got {}".format([a.mnemonic for a in tut.actions]),
     )
 
-    # ctx.actions.write and ctx.actions.symlink are performed by Bazel in process. Anything else
-    # would mean a spawn, and so an execution platform and remote traffic per target.
+    # ctx.actions.write and ctx.actions.symlink run in process, so a target costs no spawn and
+    # no remote traffic.
     contributed = sorted({
         action.mnemonic: None
         for action in tut.actions
@@ -120,8 +115,8 @@ def _executable_is_a_symlink_test_impl(ctx):
         "nextest_test should only write metadata and symlink the runner",
     )
 
-    # The two metadata documents plus the stub workspace manifest. Asserted by name rather than
-    # by counting actions, because the coverage configuration adds a write of its own.
+    # The two metadata documents plus the stub workspace manifest. Matched by name, since the
+    # coverage configuration adds a write of its own.
     written = _write_action_contents(tut)
     for suffix in [
         ".nextest-binaries.json",
@@ -136,6 +131,38 @@ def _executable_is_a_symlink_test_impl(ctx):
 
     return analysistest.end(env)
 
+def _coverage_env_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    tut = analysistest.target_under_test(env)
+
+    environment = tut[RunEnvironmentInfo].environment
+    for name in [
+        "CC_CODE_COVERAGE_SCRIPT",
+        "GENERATE_LLVM_LCOV",
+        "RULES_RS_NEXTEST_COVERAGE_OBJECTS",
+        "RUST_LLVM_COV",
+        "RUST_LLVM_PROFDATA",
+    ]:
+        asserts.true(env, name in environment, "{} should be set under coverage".format(name))
+
+    # The collector resolves the objects against the runfiles root, so they carry the
+    # repository prefix.
+    objects = environment["RULES_RS_NEXTEST_COVERAGE_OBJECTS"]
+    asserts.true(
+        env,
+        objects.startswith("_main/") or objects.startswith("test/"),
+        "coverage objects should be rlocation paths, got {}".format(objects),
+    )
+
+    return analysistest.end(env)
+
 metadata_content_test = analysistest.make(_metadata_content_test_impl)
 no_machine_paths_test = analysistest.make(_no_machine_paths_test_impl)
 executable_is_a_symlink_test = analysistest.make(_executable_is_a_symlink_test_impl)
+coverage_env_test = analysistest.make(
+    _coverage_env_test_impl,
+    config_settings = {
+        "//command_line_option:collect_code_coverage": True,
+        "//command_line_option:instrumentation_filter": "//nextest[:/]",
+    },
+)

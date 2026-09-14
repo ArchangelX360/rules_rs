@@ -7,7 +7,7 @@ the Cargo workspace fixtures, the same way test/miri is.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("@rules_rs//rs/experimental/nextest:defs.bzl", "nextest_test", "rust_nextest_test")
-load(":analysis_test.bzl", "executable_is_a_symlink_test", "metadata_content_test", "no_machine_paths_test")
+load(":analysis_test.bzl", "coverage_env_test", "executable_is_a_symlink_test", "metadata_content_test", "no_machine_paths_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -93,8 +93,7 @@ rust_nextest_test(
     edition = "2021",
 )
 
-# Several test binaries scheduled by one nextest run inside a single Bazel target. This is the
-# shape rust_test cannot express, and it is why nextest_test is public alongside the macro.
+# Several test binaries scheduled by one nextest run inside a single Bazel target.
 rust_test(
     name = "multi_a",
     srcs = ["integration_test.rs"],
@@ -125,7 +124,7 @@ nextest_test(
     ],
 )
 
-# Deliberately failing, so junit_report_test can assert on a real report. Never run directly.
+# Fails on purpose so junit_report_test can assert on a real report. Not run directly.
 rust_nextest_test(
     name = "failing_test",
     srcs = ["failing_test.rs"],
@@ -161,5 +160,10 @@ no_machine_paths_test(
 
 executable_is_a_symlink_test(
     name = "executable_is_a_symlink_test",
+    target_under_test = ":unit_test",
+)
+
+coverage_env_test(
+    name = "coverage_env_test",
     target_under_test = ":unit_test",
 )

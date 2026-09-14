@@ -1,13 +1,12 @@
 """Synthesis of the two JSON documents `cargo-nextest` needs to run without cargo.
 
-`cargo nextest run --binaries-metadata <A> --cargo-metadata <B>` skips the cargo invocation
-and the build entirely, so Bazel can supply both documents from analysis. `<A>` is normally
-produced by `cargo nextest list --list-type binaries-only --message-format json` and `<B>` by
-`cargo metadata --format-version 1`; here both are written by `ctx.actions.write`.
+`cargo nextest run --binaries-metadata <A> --cargo-metadata <B>` skips the cargo invocation and
+the build entirely. `<A>` is what `cargo nextest list --list-type binaries-only --message-format
+json` emits and `<B>` what `cargo metadata --format-version 1` emits; both are written here by
+`ctx.actions.write`.
 
-Every function in this file is pure -- values in, strings out -- so the schema fidelity that
-carries all of the version-skew risk is unit-testable without running an action. See
-`metadata_test.bzl`, whose golden strings pin the exact bytes.
+Every function is pure -- values in, strings out -- and covered by `metadata_test.bzl`, whose
+expected documents pin the schema.
 
 Schema references, at cargo-nextest 0.9.143:
 
@@ -15,15 +14,6 @@ Schema references, at cargo-nextest 0.9.143:
   -- nextest-metadata/src/test_list.rs
 * `PlatformSummary` -- target-spec/src/summaries.rs
 * `Metadata`, `Package`, `Target` -- the cargo_metadata crate (0.23.1), read by guppy 0.17.26
-
-Two deliberate choices about fields:
-
-* `build-directory` is omitted. nextest then defaults it to `target-directory`, so a single
-  `--target-dir-remap` covers `binary-path` remapping and we never depend on
-  `--build-dir-remap`, which only exists from 0.9.131.
-* Every `Package` field is emitted explicitly, even the ones with serde defaults, because
-  which fields carry `#[serde(default)]` has changed across cargo_metadata versions and being
-  explicit costs nothing here.
 """
 
 load(
@@ -41,10 +31,9 @@ _LIB_CRATE_TYPES = ["lib", "rlib", "dylib", "proc-macro"]
 def rlocationpath(file, workspace_name):
     """Returns the runfiles-root-relative path of `file`.
 
-    This is the same helper rules_rust's lint_test.bzl uses. It is deliberately not
-    `File.short_path`: a short path is relative to the *workspace* directory and spells
-    external repositories `../repo/...`, whereas nextest needs a single root under which both
-    main-repo and external-repo binaries resolve.
+    nextest needs a single root under which both main-repo and external-repo binaries resolve.
+    A `File.short_path` is relative to the workspace directory and spells external repositories
+    `../repo/...`, so it is normalised here.
 
     Args:
         file: A `File`.
@@ -135,17 +124,13 @@ def binary_kind_and_id(wrapped_crate_type, package_name, target_name):
     return "test", "{}::{}".format(package_name, target_name)
 
 def validate_binaries(binaries):
-    """Checks the one invariant nextest would not report itself.
+    """Checks that binary ids are unique.
 
-    `rust-binaries` is a JSON object keyed by binary id, so a duplicate id silently collapses
-    an entry and every test in the dropped binary vanishes with no error anywhere. That has to
-    be caught at analysis time, naming the offending targets.
+    `rust-binaries` is a JSON object keyed by binary id, so a duplicate id collapses an entry
+    and every test in the dropped binary vanishes with no error.
 
-    Package ids are deliberately *not* checked: several test binaries in one Bazel package
-    legitimately belong to one cargo package, which is exactly how cargo models a lib unit test
-    and its integration tests. `cargo_metadata_json` emits one entry per distinct package.
-
-    Returned rather than raised so the logic stays unit-testable.
+    Package ids are not checked: several test binaries in one Bazel package share one cargo
+    package, and `cargo_metadata_json` emits one entry per distinct package.
 
     Args:
         binaries: A list of structs as returned by `binary_entry`.
@@ -220,14 +205,10 @@ def binary_entry(
     )
 
 def _libdir():
-    # `unavailable` is the honest and the cheap answer. The libdir's only consumer is
-    # `RustBuildMeta::dylib_paths()`, which appends the rustc sysroot lib directory to the
-    # platform dynamic-library search path; when it is unknown, nextest logs "failed to detect
-    # the rustc libdir" and carries on. Nothing breaks, because rules_rust links libstd
-    # statically by default, nextest runs each binary at its real runfiles path so $ORIGIN
-    # rpaths still resolve, and the runner prepends the runfiles library directories itself.
-    # Reporting `available` would require an absolute machine path in a build artifact, which
-    # is exactly what this design exists to avoid.
+    # The libdir feeds `RustBuildMeta::dylib_paths()`, which appends the rustc sysroot lib
+    # directory to the dynamic-library search path. Reported unavailable to keep absolute machine
+    # paths out of the metadata; nextest logs "failed to detect the rustc libdir" and carries on,
+    # and the runner supplies the runfiles library directories itself.
     return {"reason": "not-in-archive", "status": "unavailable"}
 
 def binaries_metadata_json(*, binaries, target_triple):
@@ -255,8 +236,11 @@ def binaries_metadata_json(*, binaries, target_triple):
                 for binary in sorted(binaries, key = lambda binary: binary.binary_id)
             },
             "rust-build-meta": {
-                # Relative dylib search directories. Left empty: the runner owns the dynamic
-                # library search path, because it knows the runfiles layout and nextest does not.
+                # "build-directory" is absent, so nextest defaults it to "target-directory" and
+                # one --target-dir-remap covers the binary paths.
+                #
+                # Relative dylib search directories, left empty: the runner owns the dynamic
+                # library search path.
                 "base-output-directories": [],
                 "build-script-out-dirs": {},
                 "linked-paths": [],
@@ -274,6 +258,8 @@ def binaries_metadata_json(*, binaries, target_triple):
     ) + "\n"
 
 def _package(binary):
+    # Every field is emitted explicitly, including the ones with serde defaults: which fields
+    # carry `#[serde(default)]` has moved between cargo_metadata versions.
     fields = binary.package_fields
     return {
         "authors": fields.get("authors", []),

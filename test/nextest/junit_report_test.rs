@@ -1,9 +1,5 @@
 //! Asserts on the JUnit report a real nextest run produces.
 //!
-//! `rust_test` gives Bazel a bare libtest binary, so `XML_OUTPUT_FILE` goes unused and Bazel
-//! synthesizes a stub report from the test log. The whole point of this rule is that the
-//! report is real, so it is worth asserting on rather than trusting.
-//!
 //! `failing_test` is run as a subprocess with a temporary `XML_OUTPUT_FILE`. It is a `data`
 //! dependency, so its runfiles are merged into this test's and the two share one tree.
 
@@ -19,8 +15,8 @@ fn junit_report_describes_each_test() {
     // against the runfiles root, so they need the workspace prefix.
     let rlocation = |rootpath: &str| format!("{workspace}/{rootpath}");
 
-    // `$(rootpath)` on an executable target resolves to the executable. The rule names its
-    // generated metadata after it, so those are derived rather than expanded separately.
+    // `$(rootpath)` on an executable target resolves to the executable, and the rule names its
+    // generated metadata after it.
     let executable = std::env::var("FAILING_TEST").expect("FAILING_TEST");
     let nextest = std::env::var("NEXTEST_BINARY").expect("NEXTEST_BINARY");
 
@@ -61,8 +57,7 @@ fn junit_report_describes_each_test() {
     let xml = std::fs::read_to_string(&xml_path)
         .unwrap_or_else(|err| panic!("no JUnit report at {}: {err}", xml_path.display()));
 
-    // One <testsuite> per binary and one <testcase> per test: the structure rust_test cannot
-    // produce, since Bazel only sees a single opaque process.
+    // One <testsuite> per binary and one <testcase> per test.
     assert!(xml.contains("<testsuite "), "no testsuite element in:\n{xml}");
     assert!(xml.contains("name=\"this_one_fails\""), "missing the failing test:\n{xml}");
     assert!(xml.contains("name=\"this_one_passes\""), "missing the passing test:\n{xml}");
@@ -70,6 +65,6 @@ fn junit_report_describes_each_test() {
     assert!(xml.contains("deliberate failure"), "the panic message was not captured:\n{xml}");
     assert!(xml.contains("tests=\"2\""), "expected two tests in:\n{xml}");
     assert!(xml.contains("failures=\"1\""), "expected one failure in:\n{xml}");
-    // Named after the Bazel target, so reports stay identifiable once collected.
+    // Named after the Bazel target.
     assert!(xml.contains("//nextest:failing_test"), "report-name not from TEST_TARGET:\n{xml}");
 }

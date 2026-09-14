@@ -4,8 +4,8 @@
 //! environment variables set by the rule, translates the Bazel test protocol into nextest flags
 //! and configuration, runs nextest, and maps the result back onto Bazel's expectations.
 //!
-//! Deliberately `std`-only and free of any shell, so one implementation covers Linux, macOS
-//! and Windows on x86_64 and aarch64.
+//! `std`-only and free of any shell, so one implementation covers Linux, macOS and Windows on
+//! x86_64 and aarch64.
 
 use std::env;
 use std::ffi::OsString;
@@ -41,8 +41,8 @@ fn var(name: &str) -> Option<String> {
     }
 }
 
-/// Writes a diagnostic to `TEST_INFRASTRUCTURE_FAILURE_FILE`, telling Bazel that the failure
-/// is in the harness rather than in the code under test.
+/// Writes a diagnostic to `TEST_INFRASTRUCTURE_FAILURE_FILE`, marking the failure as a harness
+/// failure, not a test failure.
 fn record_infrastructure_failure(message: &str) {
     if let Some(path) = var("TEST_INFRASTRUCTURE_FAILURE_FILE") {
         let _ = fs::write(path, format!("nextest runner: {message}\n"));
@@ -58,7 +58,7 @@ fn record_infrastructure_failure(message: &str) {
 /// nextest needs a real directory tree: every `binary-path` must be an existing file and every
 /// test's working directory must be an existing directory. When Bazel provides only a manifest
 /// (Windows without symlink privileges, `--noenable_runfiles`), the tree is materialized under
-/// `TEST_TMPDIR` so the rule works without requiring any repo-wide flag change.
+/// `TEST_TMPDIR`.
 struct Runfiles {
     root: PathBuf,
 }
@@ -66,11 +66,11 @@ struct Runfiles {
 impl Runfiles {
     /// Locates the runfiles, materializing them from a manifest if there is no usable tree.
     ///
-    /// `canary` is a runfiles path that must resolve; the binaries metadata is used, since it is
-    /// always required. A staged directory is preferred whenever it contains that file, even
-    /// when `RUNFILES_MANIFEST_ONLY` is set: Bazel sets that variable under
-    /// `--noenable_runfiles` but still stages runfiles as action inputs on platforms with
-    /// symlinks, and it does not always set `RUNFILES_MANIFEST_FILE` to go with it.
+    /// `canary` is a runfiles path that must resolve; the binaries metadata serves, being always
+    /// required. A staged directory wins whenever it contains that file, including when
+    /// `RUNFILES_MANIFEST_ONLY` is set: under `--noenable_runfiles` Bazel sets that variable but
+    /// still stages runfiles on platforms with symlinks, and does not always set
+    /// `RUNFILES_MANIFEST_FILE` alongside it.
     fn discover(scratch: &Path, canary: &str) -> Result<Self, String> {
         let mut tried = Vec::new();
 
@@ -142,8 +142,7 @@ impl Runfiles {
         self.root.join(path)
     }
 
-    /// Resolves a runfiles path, failing when it is absent so the error names the missing file
-    /// rather than surfacing later as an opaque nextest error.
+    /// Resolves a runfiles path, failing with the name of the missing file when it is absent.
     fn require(&self, path: &str, what: &str) -> Result<PathBuf, String> {
         let resolved = self.rlocation(path);
         if resolved.exists() {
@@ -277,8 +276,8 @@ fn config_list(name: &str) -> Vec<String> {
 
 /// Escapes a string as a TOML basic string.
 ///
-/// Basic strings rather than literal strings, because Windows paths are full of backslashes
-/// and `TEST_TMPDIR` can contain almost anything.
+/// Basic strings, since Windows paths are full of backslashes and `TEST_TMPDIR` can contain
+/// almost anything.
 fn toml_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
@@ -301,11 +300,11 @@ fn toml_string(value: &str) -> String {
 
 /// Builds the nextest configuration for this run.
 ///
-/// `store.dir` and `junit.path` are absolute on purpose. nextest resolves `store.dir` as
+/// `store.dir` and `junit.path` are absolute. nextest resolves `store.dir` as
 /// `workspace_root.join(store.dir)` and `junit.path` as `store_dir.join(profile).join(path)`,
-/// and Rust's `Path::join` replaces the whole path when its argument is absolute. So both land
-/// exactly where Bazel wants them: no writable workspace is needed, and the JUnit report is
-/// written straight to `XML_OUTPUT_FILE` with no copy step.
+/// and Rust's `Path::join` replaces the whole path when its argument is absolute, so both land
+/// where Bazel wants them: no writable workspace, and the JUnit report goes straight to
+/// `XML_OUTPUT_FILE`.
 fn write_config(
     path: &Path,
     profile: &str,
@@ -320,18 +319,16 @@ fn write_config(
 
     for name in profile_chain(profile) {
         let _ = writeln!(toml, "\n[profile.{name}]");
-        // libtest runs every test in the binary, while nextest stops at the first failure.
-        // Matching rust_test means turning fail-fast off, which also keeps the JUnit report
-        // complete instead of truncated at the first failure.
+        // nextest stops at the first failure by default; libtest, and so rust_test, runs every
+        // test. Off by default here, which also keeps the JUnit report complete.
         let _ = writeln!(toml, "fail-fast = {fail_fast}");
         let _ = writeln!(toml, "status-level = \"fail\"");
         let _ = writeln!(toml, "final-status-level = \"fail\"");
         let _ = writeln!(toml, "failure-output = \"immediate\"");
         let _ = writeln!(toml, "success-output = \"never\"");
         if let Some(secs) = global_timeout_secs {
-            // Self-terminating a little before Bazel's deadline is what turns a timeout into a
-            // report: nextest kills the run and flushes the JUnit XML, where a Bazel
-            // SIGTERM/SIGKILL would leave no report at all.
+            // Self-terminating before Bazel's deadline lets nextest flush the JUnit XML; a
+            // Bazel SIGTERM/SIGKILL leaves no report.
             let _ = writeln!(toml, "global-timeout = \"{secs}s\"");
         }
 
@@ -345,10 +342,8 @@ fn write_config(
             );
             let _ = writeln!(toml, "store-success-output = false");
             let _ = writeln!(toml, "store-failure-output = true");
-            // "ignored" rather than "all": it reports #[ignore]d tests as skipped, which is
-            // what a libtest XML conventionally shows, without also reporting every test that
-            // a filter or a shard partition excluded. Under "all" each shard would list the
-            // whole suite, so a merged report would show one entry per test per shard.
+            // "ignored" reports #[ignore]d tests as skipped, matching a libtest XML, and omits
+            // tests excluded by a filter or a shard partition.
             let _ = writeln!(toml, "report-skipped = \"ignored\"");
         }
     }
@@ -428,8 +423,8 @@ fn run() -> Result<i32, String> {
     let binaries_metadata_path = require_config("BINARIES_METADATA")?;
     let runfiles = Runfiles::discover(&scratch, &binaries_metadata_path)?;
 
-    // Announce sharding support before anything can fail: without this file Bazel assumes the
-    // target ignores sharding and silently runs the whole suite in every shard.
+    // Announced before anything can fail. Without this file Bazel assumes the target ignores
+    // sharding and runs the full suite in every shard.
     let sharding = sharding()?;
     if sharding.is_some() {
         if let Some(status_file) = var("TEST_SHARD_STATUS_FILE") {
@@ -539,11 +534,10 @@ fn run() -> Result<i32, String> {
     // `args` attribute itself, so the rule must not pass them again.
     //
     // Everything is forwarded after `--`, where nextest emulates the libtest command line:
-    // filters there are substring matches by default and exact ones under `--exact`, and
-    // `--skip`, `--ignored`, `--include-ignored` and `--nocapture` are accepted natively. That
-    // is precisely `rust_test`'s behaviour, and keeping flags and their filters together in
-    // one block is what makes `--exact <name>` work. Only arguments nextest does not accept in
-    // that position are translated.
+    // filters are substring matches by default and exact under `--exact`, and `--skip`,
+    // `--ignored`, `--include-ignored` and `--nocapture` are accepted natively. This matches
+    // `rust_test`, and keeps a flag and its filter together so `--exact <name>` works. Only
+    // arguments nextest does not accept there are translated.
     let mut runtime = env::args_os().skip(1);
     while let Some(arg) = runtime.next() {
         let text = arg.to_string_lossy().into_owned();
@@ -618,8 +612,8 @@ fn configure_environment(
     tmp: &Path,
     scratch: &Path,
 ) -> Result<(), String> {
-    // Variables that would let cargo's view of the world leak in, or that would fight the
-    // flags this runner passes explicitly.
+    // Variables that leak cargo's view of the world, or that conflict with the flags passed
+    // explicitly below.
     for name in [
         "CARGO",
         "CARGO_BUILD_TARGET",
@@ -638,18 +632,16 @@ fn configure_environment(
     }
 
     // nextest reads $CARGO_HOME/config.toml and walks every ancestor of its working directory
-    // looking for .cargo/config.toml, from which it honours `[env]`, `build.target` and
-    // `target.<triple>.runner`. Pointing CARGO_HOME at an empty directory removes the dominant
-    // leak, since a developer's ~/.cargo/config.toml is exactly that file.
+    // for .cargo/config.toml, honouring `[env]`, `build.target` and `target.<triple>.runner`.
+    // An empty CARGO_HOME covers the first of those.
     let cargo_home = scratch.join("cargo-home");
     fs::create_dir_all(&cargo_home)
         .map_err(|err| format!("failed to create {}: {err}", cargo_home.display()))?;
     command.env("CARGO_HOME", &cargo_home);
 
-    // The same discovery walk starts at the working directory, so nextest runs from an empty
-    // scratch directory rather than from the runfiles tree, where a checked-in
-    // .cargo/config.toml would otherwise be picked up. Each test's own working directory is
-    // unaffected: nextest sets it from the remapped manifest directory.
+    // The discovery walk starts at the working directory, so nextest runs from an empty scratch
+    // directory and never sees a .cargo/config.toml checked into the runfiles tree. Each test's
+    // own working directory is unaffected; nextest sets it from the remapped manifest directory.
     let cwd = scratch.join("cwd");
     fs::create_dir_all(&cwd)
         .map_err(|err| format!("failed to create {}: {err}", cwd.display()))?;
@@ -669,11 +661,12 @@ fn configure_environment(
         command.env("RUST_BACKTRACE", "1");
     }
 
-    // Recorded in the test log as well as at analysis time, for anyone reading a log later.
-    if var("COVERAGE_DIR").is_some() {
-        eprintln!(
-            "nextest runner: warning: coverage is not supported; this test contributes nothing \
-             to the coverage report. Use rust_test for targets whose coverage you measure."
+    // One process per test means one profile per test, so the pattern must vary per process.
+    // Bazel's coverage driver normally sets this; only fill it in when it has not.
+    if let (Some(coverage_dir), None) = (var("COVERAGE_DIR"), var("LLVM_PROFILE_FILE")) {
+        command.env(
+            "LLVM_PROFILE_FILE",
+            Path::new(&coverage_dir).join("nextest-%p-%m.profraw"),
         );
     }
 
@@ -698,16 +691,11 @@ fn configure_environment(
     Ok(())
 }
 
-/// Reports Cargo configuration files that nextest will read despite the isolation above.
+/// Warns about Cargo configuration files that nextest reads despite the isolation above.
 ///
-/// nextest walks every ancestor of its working directory looking for `.cargo/config[.toml]`
-/// and honours `[env]`, `build.target` and `target.<triple>.runner` from what it finds. That
-/// walk cannot be bounded from outside the process, and Cargo's `[env]` merge is per key, so
-/// an ancestor entry cannot be neutralized by asserting anything nearer.
-///
-/// What is possible is to make it visible: a leak that shows up as a named warning is a
-/// support question, whereas a silent one is a mystery. Sandboxed and remotely executed runs
-/// never reach a real `.cargo` directory, so this is quiet exactly when it should be.
+/// The ancestor walk cannot be bounded from outside the process, and Cargo's `[env]` merge is
+/// per key, so an ancestor entry cannot be overridden from a nearer one. Sandboxed and remotely
+/// executed runs never reach a real `.cargo` directory, so this is quiet there.
 ///
 /// Set `RULES_RS_NEXTEST_STRICT_CARGO_CONFIG=1` to turn the warning into an error.
 fn check_cargo_config_leaks(cwd: &Path) -> Result<(), String> {
@@ -720,8 +708,8 @@ fn check_cargo_config_leaks(cwd: &Path) -> Result<(), String> {
             if !candidate.is_file() {
                 continue;
             }
-            // A substring check rather than a TOML parse: it keeps the runner dependency-free
-            // and only the keys nextest actually reads are worth reporting.
+            // A substring check keeps the runner dependency-free, and only the keys nextest
+            // reads are worth reporting.
             let interesting = match fs::read_to_string(&candidate) {
                 Ok(text) => text.lines().any(|line| {
                     let line = line.trim_start();
@@ -762,8 +750,7 @@ fn map_exit_status(status: ExitStatus, sharded: bool) -> Result<i32, String> {
         Some(0) => Ok(0),
         Some(NEXTEST_TEST_RUN_FAILED) => Ok(1),
         Some(NEXTEST_NO_TESTS_RUN) => {
-            // An empty shard is legitimate: with hash partitioning some shards can receive no
-            // tests, and failing them would make sharding unusable.
+            // With hash partitioning a shard can legitimately receive no tests.
             if sharded {
                 Ok(0)
             } else {

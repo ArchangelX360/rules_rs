@@ -574,16 +574,11 @@ To change the pinned version permanently, edit `NEXTEST_VERSION` and the five ch
   never reach a real `.cargo` directory. For unsandboxed local builds where one sits above the
   output base, the runner prints a warning naming the file;
   `RULES_RS_NEXTEST_STRICT_CARGO_CONFIG=1` turns that into an error.
-- **Coverage is not supported.** cargo nextest runs one process per test, so collecting
-  coverage means merging per-process profiles across every test binary in a target, which is
-  not implemented. `bazel coverage` still succeeds but the target contributes nothing to the
-  report, and prints a warning saying so. Use `rust_test` for targets whose coverage you
-  measure.
 - `TEST_WARNINGS_OUTPUT_FILE`, `TEST_LOGSPLITTER_OUTPUT_FILE` and
   `TEST_UNUSED_RUNFILES_LOG_FILE` are not written: they are Google-internal channels with no
   nextest equivalent. Everything else in the
   [test encyclopedia](https://bazel.build/reference/test-encyclopedia) is supported, including
-  `TEST_PREMATURE_EXIT_FILE` and `TEST_INFRASTRUCTURE_FAILURE_FILE`.
+  coverage, `TEST_PREMATURE_EXIT_FILE` and `TEST_INFRASTRUCTURE_FAILURE_FILE`.
 
 ## Public API
 

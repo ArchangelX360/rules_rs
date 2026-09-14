@@ -1,15 +1,11 @@
 """Target-configuration selection of the `cargo-nextest` prebuilt.
 
-`cargo-nextest` is a *runtime* tool: it lives in a test's runfiles and executes on the same
-platform as the test binaries it drives. So it must be selected in the target configuration
-with `select()`, not resolved as a toolchain against the exec platform.
+`cargo-nextest` is a runtime tool: it lives in a test's runfiles and executes on the same
+platform as the test binaries it drives, so it is selected in the target configuration with
+`select()`.
 
-The selection key is `(os, cpu)` rather than a rules_rs target triple because the triple config
-settings additionally constrain libc, the Windows ABI, and float/ISA -- a triple-keyed select
-would need one arm per triple, all mapping to just five files, and would still miss
-user-defined platforms that do not set the rules_rs constraints. `(os, cpu)` is also the
-natural granularity: the musl archive is correct for both `-gnu` and `-musl` Linux targets, and
-the Apple universal binary for both macOS architectures.
+`(os, cpu)` is the right granularity for the five archives: the musl archive serves both `-gnu`
+and `-musl` Linux targets, and the Apple universal binary both macOS architectures.
 """
 
 package(default_visibility = ["//visibility:public"])

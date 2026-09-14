@@ -1,5 +1,5 @@
-//! Integration-test shape (`rust_test(srcs = ...)`), which nextest reports with a
-//! `<package>::<target>` binary id rather than the bare package name.
+//! Integration-test shape (`rust_test(srcs = ...)`), which nextest gives a
+//! `<package>::<target>` binary id.
 
 #[test]
 fn integration_one() {
