@@ -4,23 +4,15 @@
 platform as the test binaries it drives. So it must be selected in the target configuration
 with `select()`, not resolved as a toolchain against the exec platform.
 
-The selection key is `(os, cpu)` rather than a rules_rs target triple because the triple
-config settings additionally constrain libc, the Windows ABI, and float/ISA -- a triple-keyed
-select would need one arm per triple, all mapping to just five files, and would still miss
+The selection key is `(os, cpu)` rather than a rules_rs target triple because the triple config
+settings additionally constrain libc, the Windows ABI, and float/ISA -- a triple-keyed select
+would need one arm per triple, all mapping to just five files, and would still miss
 user-defined platforms that do not set the rules_rs constraints. `(os, cpu)` is also the
-natural granularity: the musl archive is correct for both `-gnu` and `-musl` Linux targets,
-and the Apple universal binary for both macOS architectures.
+natural granularity: the musl archive is correct for both `-gnu` and `-musl` Linux targets, and
+the Apple universal binary for both macOS architectures.
 """
 
-load("//rs/experimental/nextest:prebuilts.bzl", "NEXTEST_PREBUILTS", "nextest_binary_name")
-
 package(default_visibility = ["//visibility:public"])
-
-_PLATFORMS = sorted({
-    platform: None
-    for prebuilt in NEXTEST_PREBUILTS
-    for platform in prebuilt.platforms
-})
 
 [
     config_setting(
@@ -30,19 +22,27 @@ _PLATFORMS = sorted({
             "@platforms//cpu:" + cpu,
         ],
     )
-    for os, cpu in _PLATFORMS
+    for os, cpu in [
+        ("linux", "x86_64"),
+        ("linux", "aarch64"),
+        ("macos", "x86_64"),
+        ("macos", "aarch64"),
+        ("windows", "x86_64"),
+        ("windows", "aarch64"),
+    ]
 ]
 
 alias(
     name = "cargo_nextest",
     actual = select(
         {
-            ":{}_{}".format(os, cpu): "@{}//:{}".format(
-                prebuilt.repo,
-                nextest_binary_name(prebuilt),
-            )
-            for prebuilt in NEXTEST_PREBUILTS
-            for os, cpu in prebuilt.platforms
+            ":linux_x86_64": "@cargo_nextest_linux_x86_64//:cargo-nextest",
+            ":linux_aarch64": "@cargo_nextest_linux_aarch64//:cargo-nextest",
+            # One universal binary serves both macOS architectures.
+            ":macos_x86_64": "@cargo_nextest_macos//:cargo-nextest",
+            ":macos_aarch64": "@cargo_nextest_macos//:cargo-nextest",
+            ":windows_x86_64": "@cargo_nextest_windows_x86_64//:cargo-nextest.exe",
+            ":windows_aarch64": "@cargo_nextest_windows_aarch64//:cargo-nextest.exe",
         },
         no_match_error = (
             "cargo-nextest has no prebuilt binary for this target platform. " +

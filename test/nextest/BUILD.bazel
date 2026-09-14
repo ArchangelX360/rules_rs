@@ -7,7 +7,7 @@ the Cargo workspace fixtures, the same way test/miri is.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("@rules_rs//rs/experimental/nextest:defs.bzl", "nextest_test", "rust_nextest_test")
-load(":analysis_test.bzl", "coverage_env_test", "executable_is_a_symlink_test", "metadata_content_test", "no_machine_paths_test")
+load(":analysis_test.bzl", "executable_is_a_symlink_test", "metadata_content_test", "no_machine_paths_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -137,9 +137,15 @@ rust_test(
     name = "junit_report_test",
     srcs = ["junit_report_test.rs"],
     crate_name = "junit_report_test",
-    data = [":failing_test"],
+    data = [
+        ":failing_test",
+        "@rules_rs//rs/experimental/nextest:nextest_binary",
+    ],
     edition = "2021",
-    env = {"FAILING_TEST": "$(rootpath :failing_test)"},
+    env = {
+        "FAILING_TEST": "$(rootpath :failing_test)",
+        "NEXTEST_BINARY": "$(rootpath @rules_rs//rs/experimental/nextest:nextest_binary)",
+    },
 )
 
 # Analysis-time assertions on the generated metadata and actions.
@@ -155,10 +161,5 @@ no_machine_paths_test(
 
 executable_is_a_symlink_test(
     name = "executable_is_a_symlink_test",
-    target_under_test = ":unit_test",
-)
-
-coverage_env_test(
-    name = "coverage_env_test",
     target_under_test = ":unit_test",
 )

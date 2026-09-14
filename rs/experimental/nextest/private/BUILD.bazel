@@ -1,7 +1,6 @@
 load("@bazel_lib//:bzl_library.bzl", "bzl_library")
 load("//rs:rust_binary.bzl", "rust_binary")
 load(":metadata_test.bzl", "nextest_metadata_tests")
-load(":plan_test.bzl", "nextest_plan_tests")
 
 package(default_visibility = ["//rs/experimental/nextest:__subpackages__"])
 
@@ -15,16 +14,6 @@ rust_binary(
     visibility = ["//visibility:public"],
 )
 
-# Coverage collector. Unlike rules_rust's, it accepts more than one instrumented object,
-# because nextest drives one process per test and a target may hold several binaries.
-rust_binary(
-    name = "nextest_collect_coverage",
-    srcs = ["nextest_collect_coverage.rs"],
-    crate_name = "nextest_collect_coverage",
-    edition = "2024",
-    visibility = ["//visibility:public"],
-)
-
 bzl_library(
     name = "metadata",
     srcs = ["metadata.bzl"],
@@ -32,28 +21,11 @@ bzl_library(
 )
 
 bzl_library(
-    name = "plan",
-    srcs = ["plan.bzl"],
-    deps = [":constants"],
-)
-
-bzl_library(
-    name = "coverage",
-    srcs = ["coverage.bzl"],
-    deps = [
-        ":constants",
-        ":metadata",
-    ],
-)
-
-bzl_library(
     name = "nextest_test",
     srcs = ["nextest_test.bzl"],
     deps = [
         ":constants",
-        ":coverage",
         ":metadata",
-        ":plan",
         "@rules_rust//rust:bzl_lib",
         "@rules_rust//rust/private:bzl_lib",
     ],
@@ -69,8 +41,6 @@ bzl_library(
 )
 
 nextest_metadata_tests()
-
-nextest_plan_tests()
 
 bzl_library(
     name = "constants",

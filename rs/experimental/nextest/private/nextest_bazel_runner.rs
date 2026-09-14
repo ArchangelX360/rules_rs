@@ -1,22 +1,18 @@
 //! Bazel test driver for `cargo-nextest`.
 //!
-//! Bazel executes this binary as the test. It reads a plan file naming the nextest binary and
-//! the generated metadata, translates the Bazel test protocol into nextest flags and
-//! configuration, runs nextest, and maps the result back onto Bazel's expectations.
+//! Bazel executes this binary as the test. It reads its configuration from `RULES_RS_NEXTEST_*`
+//! environment variables set by the rule, translates the Bazel test protocol into nextest flags
+//! and configuration, runs nextest, and maps the result back onto Bazel's expectations.
 //!
 //! Deliberately `std`-only and free of any shell, so one implementation covers Linux, macOS
 //! and Windows on x86_64 and aarch64.
 
-use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-
-/// Plan format version understood by this runner. Must match `PLAN_VERSION` in constants.bzl.
-const PLAN_VERSION: &str = "1";
 
 /// nextest exit codes, from nextest-metadata/src/exit_codes.rs.
 const NEXTEST_TEST_RUN_FAILED: i32 = 100;
@@ -70,8 +66,8 @@ struct Runfiles {
 impl Runfiles {
     /// Locates the runfiles, materializing them from a manifest if there is no usable tree.
     ///
-    /// `canary` is a runfiles path that must resolve; the plan file is used, since it is always
-    /// required. A staged directory is preferred whenever it actually contains that file, even
+    /// `canary` is a runfiles path that must resolve; the binaries metadata is used, since it is
+    /// always required. A staged directory is preferred whenever it contains that file, even
     /// when `RUNFILES_MANIFEST_ONLY` is set: Bazel sets that variable under
     /// `--noenable_runfiles` but still stages runfiles as action inputs on platforms with
     /// symlinks, and it does not always set `RUNFILES_MANIFEST_FILE` to go with it.
@@ -244,83 +240,34 @@ fn unescape(value: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Plan file
+// Configuration
 // ---------------------------------------------------------------------------------------------
 
-#[derive(Default)]
-struct Plan {
-    single: BTreeMap<String, String>,
-    repeated: BTreeMap<String, Vec<String>>,
+/// Prefix for the variables the nextest rule sets via `RunEnvironmentInfo`.
+const ENV_PREFIX: &str = "RULES_RS_NEXTEST_";
+
+/// Reads one configuration variable.
+fn config(name: &str) -> Option<String> {
+    var(&format!("{ENV_PREFIX}{name}"))
 }
 
-const SINGLE_KEYS: &[&str] = &[
-    "version",
-    "nextest",
-    "binaries_metadata",
-    "cargo_metadata",
-    "workspace_manifest",
-    "user_config",
-    "profile",
-    "fail_fast",
-    "test_threads",
-    "filter_expr",
-    "allow_no_tests",
-];
-const REPEATED_KEYS: &[&str] = &["dylib_dir", "nextest_arg"];
+/// Reads a configuration variable that must be present.
+fn require_config(name: &str) -> Result<String, String> {
+    config(name).ok_or_else(|| {
+        format!(
+            "{ENV_PREFIX}{name} is not set; the nextest rule sets it via RunEnvironmentInfo"
+        )
+    })
+}
 
-impl Plan {
-    fn load(path: &Path) -> Result<Self, String> {
-        let contents = fs::read_to_string(path)
-            .map_err(|err| format!("failed to read plan {}: {err}", path.display()))?;
-        let mut plan = Plan::default();
-        for (number, line) in contents.lines().enumerate() {
-            if line.is_empty() {
-                continue;
-            }
-            let (key, value) = line.split_once('\t').ok_or_else(|| {
-                format!("plan {}:{}: expected a tab-separated key and value", path.display(), number + 1)
-            })?;
-            if REPEATED_KEYS.contains(&key) {
-                plan.repeated.entry(key.to_owned()).or_default().push(value.to_owned());
-            } else if SINGLE_KEYS.contains(&key) {
-                plan.single.insert(key.to_owned(), value.to_owned());
-            } else {
-                // A key this runner does not know means the rule and the runner disagree,
-                // which is a bug rather than something to paper over.
-                return Err(format!(
-                    "plan {}:{}: unknown key {key:?}. The nextest rule and runner are out of sync.",
-                    path.display(),
-                    number + 1
-                ));
-            }
-        }
-        match plan.single.get("version").map(String::as_str) {
-            Some(PLAN_VERSION) => {}
-            other => {
-                return Err(format!(
-                    "plan {} has version {:?}, this runner understands {PLAN_VERSION:?}",
-                    path.display(),
-                    other.unwrap_or("<missing>")
-                ));
-            }
-        }
-        Ok(plan)
-    }
-
-    fn get(&self, key: &str) -> Option<&str> {
-        self.single.get(key).map(String::as_str)
-    }
-
-    fn require(&self, key: &str) -> Result<&str, String> {
-        self.get(key).ok_or_else(|| format!("plan is missing the required key {key:?}"))
-    }
-
-    fn list(&self, key: &str) -> &[String] {
-        self.repeated.get(key).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    fn flag(&self, key: &str) -> bool {
-        self.get(key) == Some("true")
+/// Reads a list-valued configuration variable.
+///
+/// The rule joins these with newlines and rejects any value containing one, so splitting needs
+/// no escaping.
+fn config_list(name: &str) -> Vec<String> {
+    match config(name) {
+        Some(value) => value.lines().map(str::to_owned).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -477,10 +424,9 @@ fn run() -> Result<i32, String> {
     fs::create_dir_all(&scratch)
         .map_err(|err| format!("failed to create {}: {err}", scratch.display()))?;
 
-    let plan_path = var("RULES_RS_NEXTEST_PLAN")
-        .ok_or("RULES_RS_NEXTEST_PLAN is not set; the nextest rule sets it via RunEnvironmentInfo")?;
-    let runfiles = Runfiles::discover(&scratch, &plan_path)?;
-    let plan = Plan::load(&runfiles.require(&plan_path, "the nextest plan")?)?;
+    // Also the canary for locating the runfiles, since it is always required.
+    let binaries_metadata_path = require_config("BINARIES_METADATA")?;
+    let runfiles = Runfiles::discover(&scratch, &binaries_metadata_path)?;
 
     // Announce sharding support before anything can fail: without this file Bazel assumes the
     // target ignores sharding and silently runs the whole suite in every shard.
@@ -498,10 +444,11 @@ fn run() -> Result<i32, String> {
             .map_err(|err| format!("failed to create {path}: {err}"))?;
     }
 
-    let nextest = runfiles.require(plan.require("nextest")?, "the cargo-nextest binary")?;
+    let nextest = runfiles.require(&require_config("NEXTEST")?, "the cargo-nextest binary")?;
     let binaries_metadata =
-        runfiles.require(plan.require("binaries_metadata")?, "the binaries metadata")?;
-    let cargo_metadata = runfiles.require(plan.require("cargo_metadata")?, "the cargo metadata")?;
+        runfiles.require(&binaries_metadata_path, "the binaries metadata")?;
+    let cargo_metadata =
+        runfiles.require(&require_config("CARGO_METADATA")?, "the cargo metadata")?;
 
     // nextest requires a manifest at the workspace root. It only checks that the file exists
     // and never parses it, so a stub is enough. It is normally supplied as a runfiles root
@@ -516,20 +463,21 @@ fn run() -> Result<i32, String> {
         })?;
     }
 
-    let profile = plan.get("profile").unwrap_or("default").to_owned();
+    let profile = config("PROFILE").unwrap_or_else(|| "default".to_owned());
     let store_dir = var("TEST_UNDECLARED_OUTPUTS_DIR")
         .map(|dir| PathBuf::from(dir).join("nextest"))
         .unwrap_or_else(|| scratch.join("store"));
     fs::create_dir_all(&store_dir)
         .map_err(|err| format!("failed to create {}: {err}", store_dir.display()))?;
 
+    let fail_fast = config("FAIL_FAST").as_deref() == Some("true");
     let config_path = scratch.join("nextest-bazel.toml");
     write_config(
         &config_path,
         &profile,
         &store_dir,
         var("XML_OUTPUT_FILE").as_deref(),
-        plan.flag("fail_fast"),
+        fail_fast,
         global_timeout_secs(),
     )?;
 
@@ -544,30 +492,30 @@ fn run() -> Result<i32, String> {
     command.arg("--workspace-remap").arg(&runfiles.root);
     command.arg("--target-dir-remap").arg(&runfiles.root);
 
-    if let Some(user_config) = plan.get("user_config") {
+    if let Some(user_config) = config("USER_CONFIG") {
         // A tool config sits below --config-file in nextest's precedence chain, so users get
         // profiles, overrides and test groups while the Bazel-owned junit and store settings
         // still win.
-        let resolved = runfiles.require(user_config, "the nextest config file")?;
+        let resolved = runfiles.require(&user_config, "the nextest config file")?;
         let mut arg = OsString::from("rules_rs:");
         arg.push(resolved.as_os_str());
         command.arg("--tool-config-file").arg(arg);
     }
 
-    if !plan.flag("fail_fast") {
+    if !fail_fast {
         command.arg("--no-fail-fast");
     }
-    if let Some(threads) = plan.get("test_threads") {
+    if let Some(threads) = config("TEST_THREADS") {
         command.arg("--test-threads").arg(threads);
     }
     if let Some((index, total)) = sharding {
         // nextest partitions are 1-based, Bazel shard indices are 0-based.
         command.arg("--partition").arg(format!("hash:{}/{}", index + 1, total));
     }
-    if let Some(expr) = plan.get("filter_expr") {
+    if let Some(expr) = config("FILTER_EXPR") {
         command.arg("-E").arg(expr);
     }
-    for arg in plan.list("nextest_arg") {
+    for arg in config_list("ARGS") {
         command.arg(arg);
     }
 
@@ -588,7 +536,7 @@ fn run() -> Result<i32, String> {
     }
 
     // Runtime arguments come from the `args` attribute and `--test_arg`. Bazel appends the
-    // `args` attribute itself, so the rule must not embed them in the plan as well.
+    // `args` attribute itself, so the rule must not pass them again.
     //
     // Everything is forwarded after `--`, where nextest emulates the libtest command line:
     // filters there are substring matches by default and exact ones under `--exact`, and
@@ -623,7 +571,7 @@ fn run() -> Result<i32, String> {
         }
     }
 
-    configure_environment(&mut command, &plan, &runfiles, &tmp, &scratch)?;
+    configure_environment(&mut command, &runfiles, &tmp, &scratch)?;
 
     let status = command
         .status()
@@ -666,7 +614,6 @@ fn global_timeout_secs() -> Option<u64> {
 
 fn configure_environment(
     command: &mut Command,
-    plan: &Plan,
     runfiles: &Runfiles,
     tmp: &Path,
     scratch: &Path,
@@ -722,20 +669,18 @@ fn configure_environment(
         command.env("RUST_BACKTRACE", "1");
     }
 
-    // nextest runs one process per test, so the profile pattern must vary per process or the
-    // profiles overwrite each other. Bazel's own coverage driver usually sets this; only fill
-    // it in when it has not.
-    if let (Some(coverage_dir), None) = (var("COVERAGE_DIR"), var("LLVM_PROFILE_FILE")) {
-        command.env(
-            "LLVM_PROFILE_FILE",
-            Path::new(&coverage_dir).join("nextest-%p-%m.profraw"),
+    // Recorded in the test log as well as at analysis time, for anyone reading a log later.
+    if var("COVERAGE_DIR").is_some() {
+        eprintln!(
+            "nextest runner: warning: coverage is not supported; this test contributes nothing \
+             to the coverage report. Use rust_test for targets whose coverage you measure."
         );
     }
 
     // The working directory is no longer the runfiles root, so the runfiles library
     // directories are added explicitly. nextest prepends its own entries and preserves this
     // value, so both sets are searched.
-    let dylib_dirs = plan.list("dylib_dir");
+    let dylib_dirs = config_list("DYLIB_DIRS");
     if !dylib_dirs.is_empty() {
         let mut paths: Vec<PathBuf> = dylib_dirs
             .iter()

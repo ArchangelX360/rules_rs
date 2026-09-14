@@ -4,10 +4,10 @@ load("@rules_rust//rust:rust_common.bzl", "rust_common")
 load("@rules_rust//rust/private:utils.bzl", "expand_dict_value_locations")
 load(
     ":constants.bzl",
-    "PLAN_ENV_VAR",
+    "ENV_LIST_SEPARATOR",
+    "ENV_PREFIX",
     "RUST_TOOLCHAIN_TYPE",
 )
-load(":coverage.bzl", "COVERAGE_ATTRS", "coverage_enabled", "coverage_env", "coverage_runfiles")
 load(
     ":metadata.bzl",
     "binaries_metadata_json",
@@ -16,7 +16,6 @@ load(
     "rlocationpath",
     "validate_binaries",
 )
-load(":plan.bzl", "render_plan")
 
 _CARGO_PACKAGE_FIELDS = [
     "authors",
@@ -114,36 +113,71 @@ def _write_metadata(ctx, binaries, toolchain):
     )
     return binaries_file, cargo_file
 
-def _write_plan(ctx, binaries, binaries_file, cargo_file):
-    entries = [
-        ("nextest", rlocationpath(ctx.file.nextest, ctx.workspace_name)),
-        ("binaries_metadata", rlocationpath(binaries_file, ctx.workspace_name)),
-        ("cargo_metadata", rlocationpath(cargo_file, ctx.workspace_name)),
-        ("profile", ctx.attr.nextest_profile),
-        ("fail_fast", "true" if ctx.attr.fail_fast else "false"),
-    ]
+def _env_list(ctx, key, values):
+    """Joins a list for transport in one environment variable.
+
+    The separator is a newline, which cannot occur in a Bazel path. Any other value containing
+    one is rejected here rather than silently splitting into two entries at run time.
+
+    Args:
+        ctx: The rule context, used for the error message.
+        key: Attribute name, used for the error message.
+        values: The list of strings.
+
+    Returns:
+        The joined string.
+    """
+    for value in values:
+        if ENV_LIST_SEPARATOR in value:
+            fail("nextest_test {}: {} entry contains a newline, which cannot be passed to the test runner: {}".format(
+                ctx.label,
+                key,
+                repr(value),
+            ))
+    return ENV_LIST_SEPARATOR.join(values)
+
+def _runner_env(ctx, binaries, binaries_file, cargo_file):
+    """Builds the environment variables that configure the runner.
+
+    Everything the runner needs travels this way, as rules_rust's lint_test.bzl does for its
+    own shared runner. Paths are rlocation paths, which the runner resolves against the
+    runfiles root.
+
+    Args:
+        ctx: The rule context.
+        binaries: The `binary_entry` structs.
+        binaries_file: The generated binaries metadata `File`.
+        cargo_file: The generated cargo metadata `File`.
+
+    Returns:
+        A dict of environment variables.
+    """
+    env = {
+        ENV_PREFIX + "BINARIES_METADATA": rlocationpath(binaries_file, ctx.workspace_name),
+        ENV_PREFIX + "CARGO_METADATA": rlocationpath(cargo_file, ctx.workspace_name),
+        ENV_PREFIX + "FAIL_FAST": "true" if ctx.attr.fail_fast else "false",
+        ENV_PREFIX + "NEXTEST": rlocationpath(ctx.file.nextest, ctx.workspace_name),
+        ENV_PREFIX + "PROFILE": ctx.attr.nextest_profile,
+    }
     if ctx.attr.nextest_config:
-        entries.append(("user_config", rlocationpath(ctx.file.nextest_config, ctx.workspace_name)))
+        env[ENV_PREFIX + "USER_CONFIG"] = rlocationpath(ctx.file.nextest_config, ctx.workspace_name)
     if ctx.attr.test_threads:
-        entries.append(("test_threads", ctx.attr.test_threads))
+        env[ENV_PREFIX + "TEST_THREADS"] = ctx.attr.test_threads
     if ctx.attr.filter_expr:
-        entries.append(("filter_expr", ctx.attr.filter_expr))
-    for arg in ctx.attr.nextest_args:
-        entries.append(("nextest_arg", arg))
+        env[ENV_PREFIX + "FILTER_EXPR"] = ctx.attr.filter_expr
+    if ctx.attr.nextest_args:
+        env[ENV_PREFIX + "ARGS"] = _env_list(ctx, "nextest_args", ctx.attr.nextest_args)
 
     # Directories that may hold dynamic libraries the test binaries need. nextest runs from a
     # scratch directory rather than the runfiles root, so these are passed explicitly.
-    dylib_dirs = sorted({
-        _dirname(binary.rlocation_path): None
-        for binary in binaries
-    })
-    for dylib_dir in dylib_dirs:
-        if dylib_dir:
-            entries.append(("dylib_dir", dylib_dir))
-
-    plan = ctx.actions.declare_file(ctx.label.name + ".nextest-plan")
-    ctx.actions.write(output = plan, content = render_plan(entries))
-    return plan
+    dylib_dirs = [
+        dylib_dir
+        for dylib_dir in sorted({_dirname(binary.rlocation_path): None for binary in binaries})
+        if dylib_dir
+    ]
+    if dylib_dirs:
+        env[ENV_PREFIX + "DYLIB_DIRS"] = _env_list(ctx, "dylib_dir", dylib_dirs)
+    return env
 
 def _nextest_test_impl(ctx):
     if not ctx.attr.tests:
@@ -156,9 +190,22 @@ def _nextest_test_impl(ctx):
             "has no target triple to report in the generated metadata. Use rust_test for " +
             "custom targets."
         ).format(ctx.label))
+    if ctx.configuration.coverage_enabled:
+        # Coverage is unsupported, and without InstrumentedFilesInfo Bazel would simply
+        # attribute no sources -- so a target migrated from rust_test would lose its coverage
+        # with no message anywhere. Warn rather than fail, so `bazel coverage //...` still
+        # works in a repository that contains these targets. Reported here rather than only
+        # from the runner because a passing test's log is hidden unless --test_output=all.
+        print((
+            "WARNING: nextest_test {}: coverage is not supported and this target will " +
+            "contribute nothing to the report. cargo nextest runs one process per test, " +
+            "which needs a collector that merges per-process profiles across every test " +
+            "binary in the target; that is not implemented. Use rust_test for targets whose " +
+            "coverage you measure."
+        ).format(ctx.label))
+
     binaries = _collect_binaries(ctx)
     binaries_file, cargo_file = _write_metadata(ctx, binaries, toolchain)
-    plan = _write_plan(ctx, binaries, binaries_file, cargo_file)
 
     is_windows = ctx.target_platform_has_constraint(
         ctx.attr._windows_constraint[platform_common.ConstraintValueInfo],
@@ -182,33 +229,29 @@ def _nextest_test_impl(ctx):
 
     test_outputs = [_test_crate_info(target).output for target in ctx.attr.tests]
 
-    with_coverage = coverage_enabled(ctx, toolchain)
-    direct_files = [executable, plan, binaries_file, cargo_file, ctx.file.nextest] + test_outputs
+    direct_files = [executable, binaries_file, cargo_file, ctx.file.nextest] + test_outputs
     if ctx.attr.nextest_config:
         direct_files.append(ctx.file.nextest_config)
-    if with_coverage:
-        direct_files.extend(coverage_runfiles(ctx, toolchain))
 
     runfiles = ctx.runfiles(
         files = direct_files + ctx.files.data,
         root_symlinks = {"Cargo.toml": workspace_manifest},
     ).merge_all(
         [ctx.attr._runner[DefaultInfo].default_runfiles] +
-        # Each inner rust_test already carries its data, transitive dylibs and, under
-        # coverage, the llvm tools. Merging them is what makes this a drop-in for rust_test.
+        # Each inner rust_test already carries its own data and transitive dylibs. Merging them
+        # is what makes this a drop-in for rust_test.
         [target[DefaultInfo].default_runfiles for target in ctx.attr.tests] +
         [target[DefaultInfo].default_runfiles for target in ctx.attr.data if DefaultInfo in target],
     )
 
-    env = expand_dict_value_locations(ctx, ctx.attr.env, ctx.attr.data, {})
-    env[PLAN_ENV_VAR] = rlocationpath(plan, ctx.workspace_name)
-    if with_coverage:
-        env.update(coverage_env(ctx, toolchain, test_outputs))
+    # User env last, so an explicit `env` entry can override the runner's configuration.
+    env = _runner_env(ctx, binaries, binaries_file, cargo_file)
+    env.update(expand_dict_value_locations(ctx, ctx.attr.env, ctx.attr.data, {}))
 
-    providers = [
+    return [
         DefaultInfo(
             executable = executable,
-            files = depset([executable, plan, binaries_file, cargo_file]),
+            files = depset([executable, binaries_file, cargo_file]),
             runfiles = runfiles,
         ),
         RunEnvironmentInfo(
@@ -216,14 +259,6 @@ def _nextest_test_impl(ctx):
             inherited_environment = ctx.attr.env_inherit,
         ),
     ]
-    if with_coverage:
-        providers.append(coverage_common.instrumented_files_info(
-            ctx,
-            dependency_attributes = ["tests"],
-            extensions = ["rs"],
-            source_attributes = [],
-        ))
-    return providers
 
 _ATTRS = {
     "binary_ids": attr.string_dict(
@@ -297,7 +332,7 @@ _ATTRS = {
 
 nextest_test = rule(
     implementation = _nextest_test_impl,
-    attrs = _ATTRS | COVERAGE_ATTRS,
+    attrs = _ATTRS,
     doc = """Runs one or more `rust_test` binaries under `cargo nextest`.
 
 Each test runs in its own process, a JUnit report is written where Bazel expects it, and

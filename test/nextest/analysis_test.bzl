@@ -10,10 +10,14 @@ action running on an execution platform.
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 
 def _write_action_contents(tut):
-    """Returns the content of every FileWrite action, keyed by output basename."""
+    """Returns the content of every FileWrite action, keyed by output basename.
+
+    Actions whose content is not exposed are skipped: under the coverage configuration Bazel
+    adds its own `.instrumented_files` write, for which `content` is None.
+    """
     contents = {}
     for action in tut.actions:
-        if action.mnemonic != "FileWrite":
+        if action.mnemonic != "FileWrite" or action.content == None:
             continue
         for output in action.outputs.to_list():
             contents[output.basename] = action.content
@@ -116,43 +120,22 @@ def _executable_is_a_symlink_test_impl(ctx):
         "nextest_test should only write metadata and symlink the runner",
     )
 
-    # Three metadata documents plus the stub workspace manifest.
-    writes = [action for action in tut.actions if action.mnemonic == "FileWrite"]
-    asserts.equals(env, 4, len(writes), "expected four generated files")
-
-    return analysistest.end(env)
-
-def _coverage_env_test_impl(ctx):
-    env = analysistest.begin(ctx)
-    tut = analysistest.target_under_test(env)
-
-    environment = tut[RunEnvironmentInfo].environment
-    for name in [
-        "CC_CODE_COVERAGE_SCRIPT",
-        "GENERATE_LLVM_LCOV",
-        "RULES_RS_NEXTEST_COVERAGE_OBJECTS",
-        "RUST_LLVM_COV",
-        "RUST_LLVM_PROFDATA",
+    # The two metadata documents plus the stub workspace manifest. Asserted by name rather than
+    # by counting actions, because the coverage configuration adds a write of its own.
+    written = _write_action_contents(tut)
+    for suffix in [
+        ".nextest-binaries.json",
+        ".cargo-metadata.json",
+        ".nextest-workspace-manifest.toml",
     ]:
-        asserts.true(env, name in environment, "{} should be set under coverage".format(name))
-
-    # The objects are resolved against the runfiles root, so they carry the repository prefix.
-    objects = environment["RULES_RS_NEXTEST_COVERAGE_OBJECTS"]
-    asserts.true(
-        env,
-        objects.startswith("_main/") or objects.startswith("test/"),
-        "coverage objects should be rlocation paths, got {}".format(objects),
-    )
+        asserts.true(
+            env,
+            _find(written, suffix) != None,
+            "expected a generated {} file, got {}".format(suffix, sorted(written)),
+        )
 
     return analysistest.end(env)
 
 metadata_content_test = analysistest.make(_metadata_content_test_impl)
 no_machine_paths_test = analysistest.make(_no_machine_paths_test_impl)
 executable_is_a_symlink_test = analysistest.make(_executable_is_a_symlink_test_impl)
-coverage_env_test = analysistest.make(
-    _coverage_env_test_impl,
-    config_settings = {
-        "//command_line_option:collect_code_coverage": True,
-        "//command_line_option:instrumentation_filter": "//nextest[:/]",
-    },
-)

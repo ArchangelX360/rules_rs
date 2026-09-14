@@ -11,18 +11,6 @@ label_flag(
 )
 
 bzl_library(
-    name = "extensions",
-    srcs = ["extensions.bzl"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":prebuilts",
-        "@bazel_tools//tools/build_defs/repo:cache.bzl",
-        "@bazel_tools//tools/build_defs/repo:http.bzl",
-        "@bazel_tools//tools/build_defs/repo:utils.bzl",
-    ],
-)
-
-bzl_library(
     name = "defs",
     srcs = ["defs.bzl"],
     visibility = ["//visibility:public"],
@@ -30,9 +18,4 @@ bzl_library(
         "//rs/experimental/nextest/private:macro",
         "//rs/experimental/nextest/private:nextest_test",
     ],
-)
-
-bzl_library(
-    name = "prebuilts",
-    srcs = ["prebuilts.bzl"],
 )

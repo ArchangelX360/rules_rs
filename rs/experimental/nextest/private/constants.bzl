@@ -15,16 +15,13 @@
 FAKE_WORKSPACE_ROOT = "/__rules_rs_nextest_ws__"
 FAKE_TARGET_DIR = "/__rules_rs_nextest_target__"
 
-# The single environment variable the rule uses to reach the runner. Everything else the
-# runner needs is named by the plan file this points at.
-PLAN_ENV_VAR = "RULES_RS_NEXTEST_PLAN"
+# Prefix for the environment variables that carry the runner's configuration. Everything the
+# runner needs arrives this way, following rules_rust's own lint_test.bzl.
+ENV_PREFIX = "RULES_RS_NEXTEST_"
 
-# Path-separator-joined instrumented objects, read by nextest_collect_coverage.
-COVERAGE_OBJECTS_ENV_VAR = "RULES_RS_NEXTEST_COVERAGE_OBJECTS"
-
-# Bumped whenever the plan file format changes incompatibly. The runner refuses a plan whose
-# version it does not know, so a rule/runner mismatch surfaces as a clear error.
-PLAN_VERSION = "1"
+# Separator for the list-valued variables. Newlines cannot appear in a Bazel path, and the rule
+# rejects any other value containing one, so no escaping is needed.
+ENV_LIST_SEPARATOR = "\n"
 
 # `cargo_metadata::Edition` is a closed enum: an unrecognised value fails deserialization of
 # the whole document, so unknown editions are mapped to DEFAULT_EDITION instead.

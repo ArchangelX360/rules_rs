@@ -81,29 +81,6 @@ jobs:
             --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
             //...
 
-      # The only thing that catches the multi-object coverage collector regressing: nextest
-      # runs one process per test, so coverage depends on merging per-process profraw files
-      # across every test binary in a target.
-      - name: bazel coverage //nextest/...
-        if: matrix.folder == 'test'
-        env:
-          USE_BAZEL_VERSION: ${{ matrix.bazel_version }}
-        working-directory: test
-        shell: bash
-        run: |
-          bazel \
-            --bazelrc=.bazelrc \
-            coverage \
-            --config=remote \
-            --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY \
-            --instrumentation_filter=//nextest[:/] \
-            //nextest/...
-          report="$(bazel info output_path)/_coverage/_coverage_report.dat"
-          if ! grep -q '^SF:nextest/' "$report"; then
-            echo "::error::no nextest coverage in $report" >&2
-            exit 1
-          fi
-
   test_windows:
     strategy:
       fail-fast: false

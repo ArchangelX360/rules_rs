@@ -15,17 +15,32 @@ fn junit_report_describes_each_test() {
     let workspace = std::env::var("TEST_WORKSPACE").expect("TEST_WORKSPACE");
     let runfiles = PathBuf::from(std::env::var("TEST_SRCDIR").expect("TEST_SRCDIR"));
 
+    // `$(rootpath)` yields workspace-relative paths; the runner resolves its configuration
+    // against the runfiles root, so they need the workspace prefix.
+    let rlocation = |rootpath: &str| format!("{workspace}/{rootpath}");
+
     // `$(rootpath)` on an executable target resolves to the executable. The rule names its
-    // plan after the executable, so the plan is derived rather than expanded separately.
+    // generated metadata after it, so those are derived rather than expanded separately.
     let executable = std::env::var("FAILING_TEST").expect("FAILING_TEST");
-    let plan = format!("{workspace}/{executable}.nextest-plan");
+    let nextest = std::env::var("NEXTEST_BINARY").expect("NEXTEST_BINARY");
 
     let tmp = PathBuf::from(std::env::var("TEST_TMPDIR").expect("TEST_TMPDIR")).join("junit");
     std::fs::create_dir_all(&tmp).expect("scratch dir");
     let xml_path = tmp.join("report.xml");
 
     let status = Command::new(runfiles.join(&workspace).join(&executable))
-        .env("RULES_RS_NEXTEST_PLAN", &plan)
+        // The configuration the nextest rule would normally supply via RunEnvironmentInfo.
+        .env("RULES_RS_NEXTEST_NEXTEST", rlocation(&nextest))
+        .env(
+            "RULES_RS_NEXTEST_BINARIES_METADATA",
+            rlocation(&format!("{executable}.nextest-binaries.json")),
+        )
+        .env(
+            "RULES_RS_NEXTEST_CARGO_METADATA",
+            rlocation(&format!("{executable}.cargo-metadata.json")),
+        )
+        .env("RULES_RS_NEXTEST_PROFILE", "default")
+        .env("RULES_RS_NEXTEST_FAIL_FAST", "false")
         .env("TEST_SRCDIR", &runfiles)
         .env("RUNFILES_DIR", &runfiles)
         .env("TEST_TMPDIR", &tmp)
