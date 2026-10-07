@@ -1,0 +1,14 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+# The same crate is depended on twice with different features: the production
+# build gets bare `bitflags`, while tests additionally get `std` and `serde`.
+# Cargo only enables the dev-dependency features when building test targets, so
+# the binary must NOT see `std`/`serde`.
+[dependencies]
+bitflags = { version = "=2.13.0", default-features = false }
+
+[dev-dependencies]
+bitflags = { version = "=2.13.0", default-features = false, features = ["std", "serde"] }

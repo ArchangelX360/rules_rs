@@ -42,7 +42,8 @@ def all_crate_deps(
         normal = False,
         normal_dev = False,
         build = False,
-        filter_prefix = None):
+        filter_prefix = None,
+        dev_variants = None):
     specs = []
 
     if normal_dev:
@@ -53,6 +54,19 @@ def all_crate_deps(
 
     if normal or not specs:
         specs.append(_kind_dep_spec(dep_data, "deps"))
+
+    if normal_dev and dev_variants:
+        # A test target cannot link two crates sharing a `crate_name`, so the dev-feature
+        # variant replaces the normal one rather than joining it. Remapping the merged
+        # result also covers a crate that is only a normal dependency but whose features
+        # a dev-dependency raised transitively.
+        specs = [(
+            [dev_variants.get(dep, dep) for dep in shared],
+            {
+                platform: [dev_variants.get(dep, dep) for dep in deps]
+                for platform, deps in per_platform.items()
+            },
+        ) for shared, per_platform in specs]
 
     deps, per_platform = merge_structured_dep_specs(
         specs,

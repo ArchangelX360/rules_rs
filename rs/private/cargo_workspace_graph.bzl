@@ -483,6 +483,7 @@ def resolve_cargo_workspace_members(
         annotations,
         platform_triples,
         materialize_workspace_members,
+        include_dev_features = True,
         validate_lockfile = True,
         debug = False,
         dep_label_prefix = "//:",
@@ -613,7 +614,11 @@ def resolve_cargo_workspace_members(
             for triple in match_info.matches:
                 if not is_first_party_dep or materialize_workspace_members:
                     workspace_dep_labels_by_triple[triple].add(":" + dep_name)
-                feature_resolutions.features_enabled[triple].update(features)
+
+                # Cargo only enables `[dev-dependencies]` features when building test
+                # targets, so the normal resolution pass must not see them.
+                if include_dev_features or dep.get("kind") != "dev":
+                    feature_resolutions.features_enabled[triple].update(features)
 
     for crate, annotation_versions in annotations.items():
         for version_key, annotation in annotation_versions.items():
@@ -781,3 +786,102 @@ def render_dep_data(dep_data):
         "    %s: %s," % (repr(package), repr(dep_data[package]))
         for package in sorted(dep_data.keys())
     ])
+
+# Suffix for the Bazel target/repo holding a crate built with its dev-dependency-aware
+# feature set. Kept in sync with the `__<binary>` convention used for generated binaries.
+DEV_VARIANT_SUFFIX = "__dev"
+
+# A dependency edge can only add a variant, so the fixpoint below is monotone and shallow.
+_MAX_VARIANT_ROUNDS = 100
+
+def _variant_label(label, variant_fqs, dep_label_prefix):
+    # First-party workspace members are `//package` labels whose targets users hand-write,
+    # so there is no generated variant to point at.
+    if not label.startswith(dep_label_prefix):
+        return label
+
+    if label[len(dep_label_prefix):] in variant_fqs:
+        return label + DEV_VARIANT_SUFFIX
+
+    return label
+
+def _depends_on_variant(feature_resolutions, triple, variant_fqs, dep_label_prefix):
+    for label in feature_resolutions.deps[triple]:
+        if _variant_label(label, variant_fqs, dep_label_prefix) != label:
+            return True
+
+    for label in feature_resolutions.build_deps[triple]:
+        if _variant_label(label, variant_fqs, dep_label_prefix) != label:
+            return True
+
+    return False
+
+def compute_dev_variants(
+        normal_feature_resolutions_by_fq_crate,
+        dev_feature_resolutions_by_fq_crate,
+        platform_triples,
+        dep_label_prefix):
+    """Finds crates whose dev-dependency-aware resolution differs from the normal one.
+
+    Cargo enables `[dev-dependencies]` features only when building test targets, so a
+    crate reached with extra features that way needs a second Bazel target carrying them.
+    Dev resolution only ever adds features and deps, so the dev sets are a superset of the
+    normal ones and an exact comparison is enough to keep the variant set minimal.
+    """
+    variant_fqs = set()
+
+    for fq, dev in dev_feature_resolutions_by_fq_crate.items():
+        normal = normal_feature_resolutions_by_fq_crate.get(fq)
+        if not normal:
+            variant_fqs.add(fq)
+            continue
+
+        for triple in platform_triples:
+            if (dev.features_enabled[triple] != normal.features_enabled[triple] or
+                dev.deps[triple] != normal.deps[triple] or
+                dev.build_deps[triple] != normal.build_deps[triple]):
+                variant_fqs.add(fq)
+                break
+
+    # A crate one of whose dependencies gained a variant needs one too, because the label
+    # it depends on changes. Iterate until no more crates are pulled in.
+    converged = False
+    for _ in range(_MAX_VARIANT_ROUNDS):
+        added = False
+        for fq, dev in dev_feature_resolutions_by_fq_crate.items():
+            if fq in variant_fqs:
+                continue
+
+            for triple in platform_triples:
+                if _depends_on_variant(dev, triple, variant_fqs, dep_label_prefix):
+                    variant_fqs.add(fq)
+                    added = True
+                    break
+
+        if not added:
+            converged = True
+            break
+
+    if not converged:
+        fail("Dev feature variant resolution did not converge after %s rounds! This is likely " % _MAX_VARIANT_ROUNDS +
+             "a bug in rules_rs, please report it to github.com/hermeticbuild/rules_rs")
+
+    dev_deps_by_fq = {}
+    dev_build_deps_by_fq = {}
+
+    for fq in sorted(variant_fqs):
+        dev = dev_feature_resolutions_by_fq_crate[fq]
+        dev_deps_by_fq[fq] = {
+            triple: set([_variant_label(label, variant_fqs, dep_label_prefix) for label in dev.deps[triple]])
+            for triple in platform_triples
+        }
+        dev_build_deps_by_fq[fq] = {
+            triple: set([_variant_label(label, variant_fqs, dep_label_prefix) for label in dev.build_deps[triple]])
+            for triple in platform_triples
+        }
+
+    return struct(
+        dev_build_deps_by_fq = dev_build_deps_by_fq,
+        dev_deps_by_fq = dev_deps_by_fq,
+        variant_fqs = variant_fqs,
+    )

@@ -101,10 +101,118 @@ def _all_crate_deps_dedupes_across_selected_kinds_impl(ctx):
 
     return unittest.end(env)
 
+_DEV_VARIANT_DEP_DATA = {
+    "deps": ["//:tok"],
+    "deps_by_platform": {},
+    "build_deps": [],
+    "build_deps_by_platform": {},
+    "dev_deps": ["//:tok", "//:proptest"],
+    "dev_deps_by_platform": {},
+}
+
+_DEV_VARIANTS = {"//:tok": "//:tok__dev"}
+
+def _all_crate_deps_keeps_production_variant_impl(ctx):
+    env = unittest.begin(ctx)
+
+    got = all_crate_deps(
+        _DEV_VARIANT_DEP_DATA,
+        platforms = ["//cfg:linux"],
+        normal = True,
+        dev_variants = _DEV_VARIANTS,
+    )
+
+    asserts.equals(env, ["//:tok"], got)
+
+    return unittest.end(env)
+
+def _all_crate_deps_substitutes_dev_variant_impl(ctx):
+    env = unittest.begin(ctx)
+
+    got = all_crate_deps(
+        _DEV_VARIANT_DEP_DATA,
+        platforms = ["//cfg:linux"],
+        normal = True,
+        normal_dev = True,
+        dev_variants = _DEV_VARIANTS,
+    )
+
+    # The variant replaces the production label rather than joining it; a test target
+    # cannot link two crates sharing a `crate_name`.
+    asserts.equals(env, ["//:proptest", "//:tok__dev"], got)
+
+    return unittest.end(env)
+
+def _all_crate_deps_substitutes_normal_only_dep_impl(ctx):
+    env = unittest.begin(ctx)
+
+    # A crate that is only a normal dependency still needs its variant when a
+    # dev-dependency raised its features transitively.
+    got = all_crate_deps(
+        {
+            "deps": ["//:serde"],
+            "deps_by_platform": {},
+            "build_deps": [],
+            "build_deps_by_platform": {},
+            "dev_deps": [],
+            "dev_deps_by_platform": {},
+        },
+        platforms = ["//cfg:linux"],
+        normal = True,
+        normal_dev = True,
+        dev_variants = {"//:serde": "//:serde__dev"},
+    )
+
+    asserts.equals(env, ["//:serde__dev"], got)
+
+    return unittest.end(env)
+
+def _all_crate_deps_without_dev_variants_unions_impl(ctx):
+    env = unittest.begin(ctx)
+
+    # Without the split enabled there are no variants, and the bags union as before.
+    got = all_crate_deps(
+        _DEV_VARIANT_DEP_DATA,
+        platforms = ["//cfg:linux"],
+        normal = True,
+        normal_dev = True,
+    )
+
+    asserts.equals(env, ["//:proptest", "//:tok"], got)
+
+    return unittest.end(env)
+
+def _all_crate_deps_substitutes_per_platform_impl(ctx):
+    env = unittest.begin(ctx)
+
+    got = all_crate_deps(
+        {
+            "deps": [],
+            "deps_by_platform": {"//cfg:linux": ["//:tok"]},
+            "build_deps": [],
+            "build_deps_by_platform": {},
+            "dev_deps": [],
+            "dev_deps_by_platform": {"//cfg:linux": ["//:tok"]},
+        },
+        platforms = ["//cfg:linux"],
+        normal = True,
+        normal_dev = True,
+        dev_variants = _DEV_VARIANTS,
+    )
+
+    asserts.equals(env, ["//:tok__dev"], got)
+
+    return unittest.end(env)
+
 merge_structured_dep_specs_dedupes_and_promotes_test = unittest.make(_merge_structured_dep_specs_dedupes_and_promotes_impl)
 merge_structured_dep_specs_applies_filter_prefix_test = unittest.make(_merge_structured_dep_specs_applies_filter_prefix_impl)
 all_crate_deps_defaults_to_normal_test = unittest.make(_all_crate_deps_defaults_to_normal_impl)
 all_crate_deps_dedupes_across_selected_kinds_test = unittest.make(_all_crate_deps_dedupes_across_selected_kinds_impl)
+all_crate_deps_keeps_production_variant_test = unittest.make(_all_crate_deps_keeps_production_variant_impl)
+all_crate_deps_substitutes_dev_variant_test = unittest.make(_all_crate_deps_substitutes_dev_variant_impl)
+all_crate_deps_substitutes_normal_only_dep_test = unittest.make(_all_crate_deps_substitutes_normal_only_dep_impl)
+all_crate_deps_without_dev_variants_unions_test = unittest.make(_all_crate_deps_without_dev_variants_unions_impl)
+all_crate_deps_substitutes_per_platform_test = unittest.make(_all_crate_deps_substitutes_per_platform_impl)
 
 def all_crate_deps_tests():
     return unittest.suite(
@@ -113,4 +221,9 @@ def all_crate_deps_tests():
         merge_structured_dep_specs_applies_filter_prefix_test,
         all_crate_deps_defaults_to_normal_test,
         all_crate_deps_dedupes_across_selected_kinds_test,
+        all_crate_deps_keeps_production_variant_test,
+        all_crate_deps_substitutes_dev_variant_test,
+        all_crate_deps_substitutes_normal_only_dep_test,
+        all_crate_deps_without_dev_variants_unions_test,
+        all_crate_deps_substitutes_per_platform_test,
     )

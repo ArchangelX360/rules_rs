@@ -475,9 +475,43 @@ Cargo workspaces sometimes use a self-referencing dev-dependency to enable extra
 mycrate = { path = ".", features = ["test-utils"] }
 ```
 
-`rules_rs` suppresses the generated self-edge in `aliases()` and `all_crate_deps()` so this pattern does not create a Bazel dependency cycle. The requested features are still part of workspace feature resolution, so they may be enabled on the first-party crate more broadly than Cargo would enable them for a single targeted test command.
+`rules_rs` suppresses the generated self-edge in `aliases()` and `all_crate_deps()` so this pattern does not create a Bazel dependency cycle.
 
-If you need separate normal and test feature variants, model them as separate Bazel targets, with the test-only variant setting extra `crate_features` and `testonly = True`.
+By default, features requested by a `[dev-dependencies]` entry are unified into the single feature set used for every build of that crate, so they may be enabled more broadly than Cargo would enable them. Set `split_dev_features = True` on `crate.from_cargo` to resolve them separately, the way Cargo does:
+
+```toml
+[dependencies]
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "test-util"] }
+```
+
+With the split enabled, `@crates//:tokio` is built without `test-util`, and a second target `@crates//:tokio__dev` (also `@crates//:tokio-<version>__dev`) carries it. Production and test targets then select between them:
+
+```starlark
+rust_binary(
+    name = "app",
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True),                    # tokio without `test-util`
+)
+
+rust_test(
+    name = "app_test",
+    aliases = aliases(normal_dev = True),
+    deps = all_crate_deps(normal = True, normal_dev = True),  # tokio with `test-util`
+)
+```
+
+Things to know before enabling it:
+
+- `normal = True, normal_dev = True` **substitutes** the variant rather than unioning it, since a test target cannot link two crates sharing a `crate_name`.
+- It changes what existing labels mean. `@crates//:tokio` no longer carries dev-only features, so hand-written test targets that need them should depend on `@crates//:tokio__dev`. The symptom otherwise is a `rustc` error about a missing item, not an analysis failure.
+- A `__dev` target is materialized only for crates whose dev feature set actually differs, so most crates keep a single target.
+- Dev features are unified across the whole workspace, matching `cargo test --workspace` rather than `cargo test -p <member>`.
+- Git dependencies are not supported yet: a git crate that would need a variant fails with an explanatory error.
+
+First-party workspace members are not affected, because `rules_rs` does not generate their targets. If you need separate normal and test feature variants for one of those, model them as separate Bazel targets, with the test-only variant setting extra `crate_features` and `testonly = True`.
 
 </details>
 

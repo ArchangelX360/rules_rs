@@ -5,7 +5,9 @@ load("//rs/private:annotations.bzl", "annotation_for", "build_annotation_map", "
 load("//rs/private:cargo_credentials.bzl", "load_cargo_credentials")
 load(
     "//rs/private:cargo_workspace_graph.bzl",
+    "DEV_VARIANT_SUFFIX",
     "cargo_toml_fact",
+    "compute_dev_variants",
     "platform_label",
     "render_dep_data",
     "render_string_list",
@@ -120,6 +122,7 @@ def _generate_hub_and_spokes(
         validate_lockfile,
         debug,
         generate_lint_config,
+        split_dev_features,
         use_legacy_rules_rust_platforms,
         dry_run = False):
     """Generates repositories for the transitive closure of the Cargo workspace.
@@ -139,6 +142,8 @@ def _generate_hub_and_spokes(
         validate_lockfile (bool): If true, validate we have appropriate versions in Cargo.lock
         debug (bool): Enable debug logging
         generate_lint_config (bool): Generate per-package Cargo lint configuration.
+        split_dev_features (bool): Resolve `[dev-dependencies]` features separately, as
+            Cargo does, so they are not enabled for production targets.
         dry_run (bool): Run all computations but do not create repos. Useful for benchmarking.
     """
     _date(mctx, "start")
@@ -270,29 +275,62 @@ def _generate_hub_and_spokes(
 
         facts_by_fq_crate[_fq_crate(name, version)] = fact
 
-    resolved_facts = resolve_package_facts(packages, facts_by_fq_crate, platform_triples)
-    feature_resolutions_by_fq_crate = resolved_facts.feature_resolutions_by_fq_crate
-    versions_by_name = resolved_facts.versions_by_name
+    dep_label_prefix = "@%s//:" % hub_name
 
     # Only files in the current Bazel workspace can/should be watched, so check where our manifests are located.
     watch_manifests = cargo_lock_path.repo_name == ""
 
-    workspace_resolution = resolve_cargo_workspace_members(
-        mctx,
-        cargo_metadata = cargo_metadata,
-        packages = packages,
-        workspace_members = workspace_members,
-        versions_by_name = versions_by_name,
-        feature_resolutions_by_fq_crate = feature_resolutions_by_fq_crate,
-        annotations = annotations,
-        platform_triples = platform_triples,
-        materialize_workspace_members = False,
-        validate_lockfile = validate_lockfile,
-        debug = debug,
-        dep_label_prefix = "@%s//:" % hub_name,
-        watch_manifests = watch_manifests,
-        use_legacy_rules_rust_platforms = use_legacy_rules_rust_platforms,
+    def resolve_workspace(feature_resolutions_by_fq_crate, versions_by_name, include_dev_features):
+        return resolve_cargo_workspace_members(
+            mctx,
+            cargo_metadata = cargo_metadata,
+            packages = packages,
+            workspace_members = workspace_members,
+            versions_by_name = versions_by_name,
+            feature_resolutions_by_fq_crate = feature_resolutions_by_fq_crate,
+            annotations = annotations,
+            platform_triples = platform_triples,
+            materialize_workspace_members = False,
+            include_dev_features = include_dev_features,
+            validate_lockfile = validate_lockfile,
+            debug = debug,
+            dep_label_prefix = dep_label_prefix,
+            watch_manifests = watch_manifests,
+            use_legacy_rules_rust_platforms = use_legacy_rules_rust_platforms,
+        )
+
+    resolved_facts = resolve_package_facts(packages, facts_by_fq_crate, platform_triples)
+    feature_resolutions_by_fq_crate = resolved_facts.feature_resolutions_by_fq_crate
+    versions_by_name = resolved_facts.versions_by_name
+
+    workspace_resolution = resolve_workspace(
+        feature_resolutions_by_fq_crate,
+        versions_by_name,
+        include_dev_features = not split_dev_features,
     )
+
+    # With the split enabled the resolution above excluded `[dev-dependencies]` features,
+    # which is what production targets must see. Resolving a second time with them
+    # included gives the feature sets test targets need. `resolve()` retires dependency
+    # edges as it walks them, so the second pass needs a freshly built graph rather than a
+    # re-run over the same one.
+    dev_variants = None
+    dev_feature_resolutions_by_fq_crate = None
+    if split_dev_features:
+        dev_facts = resolve_package_facts(packages, facts_by_fq_crate, platform_triples)
+        dev_feature_resolutions_by_fq_crate = dev_facts.feature_resolutions_by_fq_crate
+        resolve_workspace(
+            dev_feature_resolutions_by_fq_crate,
+            dev_facts.versions_by_name,
+            include_dev_features = True,
+        )
+        dev_variants = compute_dev_variants(
+            feature_resolutions_by_fq_crate,
+            dev_feature_resolutions_by_fq_crate,
+            platform_triples,
+            dep_label_prefix,
+        )
+
     cfg_match_cache = workspace_resolution.cfg_match_cache
     platform_cfg_attrs = workspace_resolution.platform_cfg_attrs
     workspace_dep_labels_by_triple = workspace_resolution.workspace_dep_labels_by_triple
@@ -304,12 +342,18 @@ def _generate_hub_and_spokes(
 
     use_home_cargo_credentials = bool(cargo_credentials)
 
+    # Built from the spokes actually created, so it can never name a target that was
+    # not generated. First-party workspace members are not spokes: their targets are
+    # hand-written, so they never get a variant.
+    dev_variant_labels = {}
+
     for package in packages:
         crate_name = package["name"]
         version = package["version"]
         source = package["source"]
 
-        feature_resolutions = feature_resolutions_by_fq_crate[_fq_crate(crate_name, version)]
+        fq = _fq_crate(crate_name, version)
+        feature_resolutions = feature_resolutions_by_fq_crate[fq]
 
         annotation = annotation_for(annotations, crate_name, version, hub_name)
         suggested_annotation = None
@@ -370,6 +414,25 @@ crate.annotation(
         package["target_repo_name"] = repo_name
         package["target_package_path"] = ""
 
+        # A crate whose dev-dependency-aware feature set differs gets a second spoke built
+        # with those features, so test targets can link it while production targets link
+        # the crate as Cargo would build it. Reusing the same repository rule keeps the
+        # download shared via the repository cache and avoids having to give every target
+        # `rust_crate` emits a second, suffixed name.
+        dev_repo_name = None
+        dev_kwargs = None
+        if dev_variants and fq in dev_variants.variant_fqs:
+            dev_feature_resolutions = dev_feature_resolutions_by_fq_crate[fq]
+            dev_repo_name = repo_name + DEV_VARIANT_SUFFIX
+            dev_kwargs = kwargs | dict(
+                aliases = dev_feature_resolutions.aliases,
+                build_script_deps_select = _select(dev_variants.dev_build_deps_by_fq[fq]),
+                crate_features_select = _select(dev_feature_resolutions.features_enabled),
+                deps_select = _select(dev_variants.dev_deps_by_fq[fq]),
+            )
+            package["dev_target_repo_name"] = dev_repo_name
+            dev_variant_labels[dep_label_prefix + fq] = dep_label_prefix + fq + DEV_VARIANT_SUFFIX
+
         if source.startswith("sparse+"):
             checksum = package["checksum"]
 
@@ -380,8 +443,7 @@ crate.annotation(
             if source != CRATES_IO_REGISTRY:
                 qualifiers["repository_url"] = source.split("+", 1)[1]
 
-            crate_repository(
-                name = repo_name,
+            registry_args = dict(
                 additive_build_file = annotation.additive_build_file,
                 additive_build_file_content = annotation.additive_build_file_content,
                 crate_name = crate_name,
@@ -397,15 +459,18 @@ crate.annotation(
                 use_home_cargo_credentials = use_home_cargo_credentials,
                 cargo_config = cargo_config,
                 source = source,
-                **kwargs
             )
+
+            crate_repository(name = repo_name, **(registry_args | kwargs))
+
+            if dev_repo_name:
+                crate_repository(name = dev_repo_name, **(registry_args | dev_kwargs))
         elif source.startswith("path+"):
             if dry_run:
                 continue
 
             # TODO What PURL should that be ?
-            local_crate_repository(
-                name = repo_name,
+            local_args = dict(
                 additive_build_file = annotation.additive_build_file,
                 additive_build_file_content = annotation.additive_build_file_content,
                 gen_binaries = annotation.gen_binaries,
@@ -413,9 +478,23 @@ crate.annotation(
                 patch_tool = annotation.patch_tool,
                 patches = annotation.patches,
                 path = package["local_path"],
-                **kwargs
             )
+
+            local_crate_repository(name = repo_name, **(local_args | kwargs))
+
+            if dev_repo_name:
+                local_crate_repository(name = dev_repo_name, **(local_args | dev_kwargs))
         elif source.startswith("git+"):
+            if dev_repo_name:
+                # Git crates render their `rust_crate` call through a shared metadata
+                # repository rather than their own spoke, so a second feature variant cannot
+                # simply be another spoke the way registry and path crates can.
+                fail(("Crate %s needs a separate dev-dependency feature variant, which " +
+                      "`split_dev_features` does not yet support for git dependencies.\n\n" +
+                      "Either drop the extra features from the `[dev-dependencies]` entry, or " +
+                      "model the test-only variant as its own Bazel target with extra " +
+                      "`crate_features`.") % fq)
+
             remote, commit = parse_git_url(source)
 
             package_path = _git_crate_package_path(annotation, package.get("strip_prefix"))
@@ -489,6 +568,19 @@ alias(
     actual = "{actual}",
 )""".format(name = name, version = version, actual = _target_label(target_repo_name, target_package_path, name)))
 
+            dev_target_repo_name = package.get("dev_target_repo_name")
+            if dev_target_repo_name:
+                hub_contents.append("""
+alias(
+    name = "{name}-{version}{suffix}",
+    actual = "{actual}",
+)""".format(
+                    name = name,
+                    version = version,
+                    suffix = DEV_VARIANT_SUFFIX,
+                    actual = _target_label(dev_target_repo_name, target_package_path, name),
+                ))
+
             for binary in annotation.gen_binaries:
                 hub_contents.append("""
 alias(
@@ -518,6 +610,15 @@ alias(
     name = "{name}",
     actual = ":{fq}",
 )""".format(name = name, fq = fq))
+
+            if dev_variants and fq in dev_variants.variant_fqs:
+                # Escape hatch for hand-written test targets, which would otherwise have to
+                # spell out the version to reach the dev-feature variant.
+                hub_contents.append("""
+alias(
+    name = "{name}{suffix}",
+    actual = ":{fq}{suffix}",
+)""".format(name = name, fq = fq, suffix = DEV_VARIANT_SUFFIX))
 
             for binary in annotation.gen_binaries:
                 hub_contents.append("""
@@ -607,16 +708,26 @@ filegroup(
         """load(":data.bzl", "DEP_DATA")
 load("@rules_rs//rs/private:all_crate_deps.bzl", _all_crate_deps = "all_crate_deps")
 
+# Maps a production crate label to the target built with its dev-dependency-aware
+# feature set. Empty unless `split_dev_features` is enabled.
+_DEV_VARIANTS = {dev_variants}
+
 _PLATFORMS = [
     {platforms}
 ]
 
-def aliases(package_name = None):
+def aliases(package_name = None, normal_dev = False):
     dep_data = DEP_DATA.get(package_name or native.package_name())
     if not dep_data:
         return {{}}
 
-    return dep_data["aliases"]
+    aliases = dep_data["aliases"]
+    if not normal_dev or not _DEV_VARIANTS:
+        return aliases
+
+    # `all_crate_deps` substitutes dev-feature variants, so a renamed dependency must
+    # be keyed by the label the target actually depends on.
+    return {{_DEV_VARIANTS.get(label, label): name for label, name in aliases.items()}}
 
 def crate_name(package_name = None):
     dep_data = DEP_DATA.get(package_name or native.package_name())
@@ -657,6 +768,7 @@ def all_crate_deps(
         normal_dev = normal_dev,
         build = build,
         filter_prefix = {this_repo} if cargo_only else None,
+        dev_variants = _DEV_VARIANTS,
     )
 
 RESOLVED_PLATFORMS = select({{
@@ -667,6 +779,7 @@ RESOLVED_PLATFORMS = select({{
             platforms = render_string_list(resolved_platforms),
             target_compatible_with = ",\n    ".join(['"%s": []' % platform for platform in resolved_platforms]),
             this_repo = repr("@" + hub_name + "//:"),
+            dev_variants = repr(dev_variant_labels),
         )
 
     _date(mctx, "done")
@@ -825,9 +938,9 @@ def _crate_impl(mctx):
 
             if cfg.debug:
                 for _ in range(25):
-                    _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.generate_lint_config, cfg.use_legacy_rules_rust_platforms, dry_run = True)
+                    _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.generate_lint_config, cfg.split_dev_features, cfg.use_legacy_rules_rust_platforms, dry_run = True)
 
-            facts |= _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.generate_lint_config, cfg.use_legacy_rules_rust_platforms)
+            facts |= _generate_hub_and_spokes(mctx, cfg.name, annotations, suggested_annotation_snippet_paths, cargo_path, cfg.cargo_lock, cargo_toml_by_hub_name[cfg.name], hub_packages, cfg.platform_triples, cargo_credentials, effective_cargo_config, cfg.validate_lockfile, cfg.debug, cfg.generate_lint_config, cfg.split_dev_features, cfg.use_legacy_rules_rust_platforms)
 
     # Lay down the git repos with generated per-crate BUILD overlays.
     git_repos = {}
@@ -941,6 +1054,23 @@ _from_cargo = tag_class(
         ),
         "cargo_lock": attr.label(),
         "cargo_config": attr.label(),
+        "split_dev_features": attr.bool(
+            doc = """\
+If true, resolve `[dev-dependencies]` features separately from normal ones, the way Cargo
+does, so they are not enabled for production targets.
+
+Without this, features requested only by a `[dev-dependencies]` entry are unified into the
+single feature set used for every build of that crate, so a `rust_binary` sees them too.
+With it, a crate whose dev feature set differs gets an additional `<name>-<version>__dev`
+target carrying the test-only features, and `all_crate_deps(normal = True, normal_dev =
+True)` substitutes that target in place of the production one.
+
+Note this changes what existing labels mean: `@<hub>//:<crate>` no longer carries
+dev-only features. Hand-written test targets that need them should depend on
+`@<hub>//:<crate>__dev` instead.
+""",
+            default = False,
+        ),
         "generate_lint_config": attr.bool(
             doc = "If true, generate per-package Cargo lint configuration by reading workspace member manifests.",
             default = False,

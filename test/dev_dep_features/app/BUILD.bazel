@@ -1,0 +1,23 @@
+load("@dev_dep_features//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# `bitflags` is depended on twice: bare in `[dependencies]`, and with the `std` and
+# `serde` features in `[dev-dependencies]`. Cargo enables the dev-dependency features
+# only when building test targets, so the binary must link a bitflags without them.
+rust_binary(
+    name = "app",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "app_test",
+    srcs = ["tests/integration.rs"],
+    aliases = aliases(),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

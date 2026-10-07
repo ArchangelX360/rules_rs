@@ -13,6 +13,7 @@ load("@target_workspace_dep_feature//:data.bzl", target_workspace_dep_feature_de
 load("@workspace_default_features//:data.bzl", workspace_default_features_dep_data = "DEP_DATA")
 load("@workspace_hyphen_dep_aliases//:defs.bzl", workspace_hyphen_dep_aliases_aliases = "aliases")
 load("@workspace_renamed_path_dep_aliases//:defs.bzl", workspace_renamed_path_dep_aliases_aliases = "aliases")
+load("//:dev_dep_features_test.bzl", "crate_features_test")
 load("//:rustdoc_musl_unwind_test.bzl", "rustdoc_musl_unwind_link_flags_test")
 load("//:target_triple_constraints_test.bzl", "target_triple_constraints_test")
 load("//:verify_aliases.bzl", "verify_alias", "verify_alias_absent", "verify_crate_feature_absent", "verify_crate_feature_present", "verify_dep_absent", "verify_dep_present", "verify_dev_dep_absent")
@@ -184,6 +185,71 @@ genquery(
     name = "rav1e_build_script_has_annotation_tag",
     expression = 'attr("tags", ".*annotation-build-script-tag-test.*", deps(@build_script_runtime_env//:rav1e))',
     scope = ["@build_script_runtime_env//:rav1e"],
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+)
+
+# Cargo enables `[dev-dependencies]` features only when building test targets. With
+# `split_dev_features`, `dev_dep_features/app` therefore gets a `bitflags` without the
+# `std`/`serde` features its dev-dependency asks for, and a `bitflags-2.13.0__dev`
+# carrying them for the test target.
+#
+# `DEP_DATA`'s `crate_features` describes the workspace member rather than its registry
+# dependencies, so these read the features off the crate's own compile action. The hub
+# labels are aliases, which carry no actions, hence the spoke labels.
+crate_features_test(
+    name = "dev_dep_features_no_leaked_features_test",
+    target_under_test = "@@rules_rs++crate+dev_dep_features__bitflags-2.13.0//:bitflags",
+    unexpected_features = [
+        "serde",
+        "serde_core",
+        "std",
+    ],
+)
+
+crate_features_test(
+    name = "dev_dep_features_dev_variant_features_test",
+    expected_features = [
+        "serde",
+        "serde_core",
+        "std",
+    ],
+    target_under_test = "@@rules_rs++crate+dev_dep_features__bitflags-2.13.0__dev//:bitflags",
+)
+
+genquery(
+    name = "dev_dep_features_normal_deps",
+    expression = "deps(@dev_dep_features//:bitflags-2.13.0)",
+    scope = ["@dev_dep_features//:bitflags-2.13.0"],
+)
+
+genquery(
+    name = "dev_dep_features_dev_deps",
+    expression = "deps(@dev_dep_features//:bitflags-2.13.0__dev)",
+    scope = ["@dev_dep_features//:bitflags-2.13.0__dev"],
+)
+
+# `serde_core` is an optional dependency of `bitflags` that only its `serde` feature
+# activates, so it must appear in the dev graph and be absent from the production one.
+# This is the feature-driven optional-dependency path, distinct from a plain feature flag.
+genrule(
+    name = "verify_dev_dep_features_optional_dep_split",
+    srcs = [
+        ":dev_dep_features_dev_deps",
+        ":dev_dep_features_normal_deps",
+    ],
+    outs = ["verify_dev_dep_features_optional_dep_split.txt"],
+    cmd = """
+        grep -q 'serde_core' $(location :dev_dep_features_dev_deps)
+        # A `!` negation would be exempt from `set -e`, so assert explicitly.
+        if grep -q 'serde_core' $(location :dev_dep_features_normal_deps); then
+            echo "ERROR: serde_core is a [dev-dependencies]-only crate but reached the production graph" >&2
+            exit 1
+        fi
+        echo ok > $@
+    """,
     target_compatible_with = select({
         "@platforms//os:windows": ["@platforms//:incompatible"],
         "//conditions:default": [],
@@ -402,6 +468,7 @@ filegroup(
         "//conditions:default": [
             ":verify_annotation_tags",
             ":verify_cfg_feature_target_dep",
+            ":verify_dev_dep_features_optional_dep_split",
             ":verify_first_party_feature_propagation",
             ":verify_rust_analyzer_toolchain",
             ":verify_vendored_workspace_dep",

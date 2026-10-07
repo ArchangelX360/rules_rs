@@ -112,6 +112,7 @@ TESTS = [
     "build_dep_features",
     "cargo_manifest_path_env",
     "cfg_feature_target_dep",
+    "dev_dep_features",
     "empty_workspace",
     "feature_name_overrides_implicit_dep",
     "first_party_feature_propagation",
@@ -157,6 +158,7 @@ TESTS = [
             "x86_64-apple-darwin",
             "x86_64-pc-windows-gnullvm",
         ],
+        split_dev_features = test == "dev_dep_features",
     )
     for test in TESTS
 ]
